@@ -1,0 +1,67 @@
+
+
+//
+//  PROGRAM MirrorMesh.edp
+//  Symmetrizes a mesh 
+//   
+// 	INPUT FILES
+//		mesh.msh
+//
+//	OUTPUT FILES
+//		mesh_mirror.msh
+//		mesh_mirror.ff2m (and associated auxiliary files if relevant)
+//
+//
+//	This program is part of the StabFem project distributed under gnu public licence.
+//  copyright D. Fabre & coauthors, 2017-2019
+
+
+
+		cout << "$$$$ ENTERING MirrorMesh.edp " << endl << "$$" << endl; 
+//		include "SF_Geom.edp";
+		include "StabFem.idp";
+
+//
+// Parameters
+//
+
+	string symmetry = "S";
+    string symmetryBaseFlow = "S";
+	
+
+ 
+ 
+ //  Reading half-mesh and corresponding half-base flow
+     
+		mesh th1=readmesh(ffdatadir+"mesh.msh");
+
+
+		// mirrored mesh
+
+		mesh thM; 		
+		thM = movemesh(th1,[x,-y]); 
+		mesh th = th1+thM;
+		cout << "sucessfully glued meshes" << endl;
+
+// CHANGING LABEL 6 TO 69
+int[int] r1=[6,69];
+th = change(th, label=r1);
+
+
+cout << endl << "$$#### Mesh information AFTER MIRROR :" << endl;  
+        cout << "$$#### Number of vertices    " << th.nv <<  endl;
+	   // cout << "$$### Dimension of matrices " << vB[].n << endl << endl;
+
+
+	savemesh(th,ffdatadir+"mesh_mirror.msh");
+	
+	IFMACRO(SFWriteMesh)
+	SFWriteMesh(ffdatadir+"mesh_mirror.ff2m",th,"mirror");
+	ENDIFMACRO
+
+	IFMACRO(SFWriteConnectivity)
+	SFWriteConnectivity(ffdatadir+"mesh_mirror_connectivity.ff2m",th);
+	ENDIFMACRO
+
+          
+cout << "$$$$ SUCESSFULLY LEAVING Newton_2D.edp "  << endl; 

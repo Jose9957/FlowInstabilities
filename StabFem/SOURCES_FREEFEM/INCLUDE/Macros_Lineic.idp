@@ -1,0 +1,236 @@
+
+// This file contains macros to operate on lineic meshes 
+// (novelty FreeFem 4.7)
+//
+// Version 2 : DF, oct 2020. Going back to "old" method to compute normal vector
+
+
+load "isoline"
+load "msh3"
+load "Curvature"
+
+IFMACRO(!anglecut)
+	macro anglecut 0 //EOM
+ENDIFMACRO
+// explanation : this is the cut for determination of angle alpha
+// 0 -> alpha in [ -pi,pi] 
+// 1 -> alpha in [-pi/2,3*pi/2]
+// 2 -> alpha in [0, pi]
+// 3 -> alpha in [-3*pi/2,pi/2] 
+
+
+macro CalcGeomLin(Thlin,xsurf,ysurf,S0,alphasurf,N0x,N0y,K0a,K0b,Th,labelLin)
+/* This macro computes geometry, Normal vector and curvature of a lineic mesh. 
+     Return objects [xsurf,ysurf,S0,alphasurf,N0x,N0y,K0a,K0b] have to be previously 
+     defined as P1-Fields on the lineic mesh Thlin      
+     NB arguments Th and labelLin should normally not be necessary 
+        but plugin curvature currently needs them 
+        (the plugin should be rewritten to operate directly with lineic meshes) 
+*/
+	{
+	fespace VhlinMACRO(Thlin,P1);
+	fespace VhMACRO(Th,P1);
+	VhlinMACRO testM;
+	xsurf = x;
+	ysurf = y;
+	VhlinMACRO dS0;
+    S0 = S0;
+    N0x = N0x;N0y=N0y;K0a=K0a;K0b=K0b;
+	S0[](0)=0;
+	for(int kk=1;kk<xsurf[].n;kk++)
+		{ dS0[](kk-1) = sqrt((xsurf[](kk-1)-xsurf[](kk))^2+(ysurf[](kk-1)-ysurf[](kk))^2); 
+	  	S0[](kk)=S0[](kk-1)+dS0[](kk-1);
+  		};
+
+/*	solve CNx(N0x,testM) =  int1d(Thlin)(testM*N0x) 
+	                    - int1d(Thlin)(testM*Tl.y);
+	solve CNy(N0y,testM) =  int1d(Thlin)(testM*N0y) 
+	                    - int1d(Thlin)(-testM*Tl.x);
+
+if(anglecut==0)
+		{   alphasurf = atan2(N0x,-N0y);   }
+		else if(anglecut==1)
+		{   alphasurf = pi/2-atan2(-N0y,N0x);   } 
+		else if(anglecut==2)
+		{   alphasurf = pi+atan2(-N0x,N0y); }
+		else if(anglecut==3)
+		{	alphasurf = -pi/2-atan2(N0y,-N0x);   };
+*/
+
+int Nsurface = xsurf[].n;
+/* angle at center of segments */
+real[int] alphaSegSurf(Nsurface);
+for(int ksurf=0;ksurf<Nsurface-1;ksurf++)
+	{
+		if(anglecut==0)
+		{   alphaSegSurf(ksurf) = atan2(ysurf[](ksurf+1)-ysurf[](ksurf),xsurf[](ksurf+1)-xsurf[](ksurf));   }
+		else if(anglecut==1)
+		{   alphaSegSurf(ksurf) = pi/2-atan2(xsurf[](ksurf+1)-xsurf[](ksurf),ysurf[](ksurf+1)-ysurf[](ksurf));   } 
+		else if(anglecut==2)
+		{   alphaSegSurf(ksurf) = pi+atan2(-(ysurf[](ksurf+1)-ysurf[](ksurf)),-(xsurf[](ksurf+1)-xsurf[](ksurf))); }
+		else if(anglecut==3)
+		{	alphaSegSurf(ksurf) = -pi/2-atan2(-(xsurf[](ksurf+1)-xsurf[](ksurf)),-(ysurf[](ksurf+1)-ysurf[](ksurf)));   };
+	};
+/* angle at vertices (interior points) */
+for(int ksurf=1;ksurf<Nsurface-1;ksurf++)
+	  {
+	  alphasurf[](ksurf) = (dS0[](ksurf)*alphaSegSurf(ksurf-1)+dS0[](ksurf-1)*alphaSegSurf(ksurf))/(dS0[](ksurf-1)+dS0[](ksurf));
+	  };
+/* first point */	  
+	  {
+		real alphaA=alphaSegSurf(0);
+		real alphaB=alphaSegSurf(1);
+		real alphaC=alphaSegSurf(2);
+		real sA= dS0[](0)/2;
+		real sB= dS0[](0)+dS0[](1)/2.;
+		real sC= dS0[](0)+dS0[](1)+dS0[](2)/2.;
+		alphasurf[](0)=(alphaA*sB*sB*sC-alphaA*sB*sC*sC-alphaB*sA*sA*sC+alphaB*sA*sC*sC+alphaC*sA*sA*sB-alphaC*sA*sB*sB)/(sA-sB)/(sA*sB-sA*sC-sB*sC+sC*sC);
+      }
+/* last point */	  
+	  {
+		real alphaA=alphaSegSurf(Nsurface-2);
+		real alphaB=alphaSegSurf(Nsurface-3);
+		real alphaC=alphaSegSurf(Nsurface-4);
+		real sA= dS0[](Nsurface-2)/2;
+		real sB= dS0[](Nsurface-2)+dS0[](Nsurface-3)/2.;
+		real sC= dS0[](Nsurface-2)+dS0[](Nsurface-3)+dS0[](Nsurface-4)/2.;
+		alphasurf[](Nsurface-1)=(alphaA*sB*sB*sC-alphaA*sB*sC*sC-alphaB*sA*sA*sC+alphaB*sA*sC*sC+alphaC*sA*sA*sB-alphaC*sA*sB*sB)/(sA-sB)/(sA*sB-sA*sC-sB*sC+sC*sC);
+      }
+      
+/* compute normal vector as function of angle */
+
+ for(int ksurf=0;ksurf<Nsurface;ksurf++)
+ {          
+	N0x[](ksurf)  = sin(alphasurf[](ksurf));
+	N0y[](ksurf)  = -cos(alphasurf[](ksurf));     
+ };                    
+	
+	VhMACRO CurvS; CurvS[]=curvature(Th,labelLin); 
+	K0a = CurvS; 
+	/*rectify extremities*/
+	/* starting point*/
+	{
+	real s1,s2,s3,s4,s5,X1,X2,X3,X4,X5,Y1,Y2,Y3,Y4,Y5;
+	s1 =  S0[](3); s2 =  S0[](4); s3 =  S0[](0); s4 =  S0[](1); s5 =  S0[](2);
+	X1 =  xsurf[](3);	Y1 =  ysurf[](3); X2 =  xsurf[](4);	Y2 =  ysurf[](4);
+	X3 =  xsurf[](0);	Y3 =  ysurf[](0); X4 =  xsurf[](1);	Y4 =  ysurf[](1);
+	X5 =  xsurf[](2);	Y5 =  ysurf[](2);
+	real[int] X  	= [X1,X2,X3,X4,X5];
+	real[int] Y  	= [Y1,Y2,Y3,Y4,Y5];
+	matrix Sp = [	[s1^4, s1^3, s1^2 , s1 , 1. ], 
+					[s2^4, s2^3, s2^2 , s2 , 1. ], 
+					[s3^4, s3^3, s3^2 , s3 , 1. ], 
+					[s4^4, s4^3, s4^2 , s4 , 1. ], 
+					[s5^4, s5^3, s5^2 , s5 , 1. ] 	];
+	set(Sp,solver=sparsesolver);
+	/* the coefficient of the polynomial interpolation*/
+	real[int] px(5);
+	real[int] py(5);
+	/*Resolution of the linear systems*/
+	px=Sp^-1*X;		
+	py=Sp^-1*Y;
+	real dX = 4*px(0)*s3^3+3*px(1)*s3^2+2*px(2)*s3+px(3);
+	real dY = 4*py(0)*s3^3+3*py(1)*s3^2+2*py(2)*s3+py(3);
+	real ddX = 12*px(0)*s3^2+6*px(1)*s3+2*px(2);
+	real ddY = 12*py(0)*s3^2+6*py(1)*s3+2*py(2);
+	/* Courbature with x(s) and y(s) kxy = ( x'y'' -x''y' )/(x'^2+y'^2)^(3/2)*/
+	real kxy = (ddX*dY-dX*ddY)/(dX^2+dY^2)^(3./2.);
+	K0a[](0)=abs(kxy)*sign(K0a[](1)); /* warning change sign ! */
+	}
+	
+	
+	int Ns = Nsurface;
+	/* ending point */
+	{
+	real s1,s2,s3,s4,s5,X1,X2,X3,X4,X5,Y1,Y2,Y3,Y4,Y5;
+	s1 =  S0[](Ns-4); s2 =  S0[](Ns-5); s3 =  S0[](Ns-1); s4 =  S0[](Ns-2); s5 =  S0[](Ns-3);
+	X1 =  xsurf[](Ns-4);	Y1 =  ysurf[](Ns-4); X2 =  xsurf[](Ns-5);	Y2 =  ysurf[](Ns-5);
+	X3 =  xsurf[](Ns-1);	Y3 =  ysurf[](Ns-1); X4 =  xsurf[](Ns-2);	Y4 =  ysurf[](Ns-2);
+	X5 =  xsurf[](Ns-3);	Y5 =  ysurf[](Ns-3);
+	real[int] X  	= [X1,X2,X3,X4,X5];
+	real[int] Y  	= [Y1,Y2,Y3,Y4,Y5];
+	matrix Sp = [	[s1^4, s1^3, s1^2 , s1 , 1. ], 
+					[s2^4, s2^3, s2^2 , s2 , 1. ], 
+					[s3^4, s3^3, s3^2 , s3 , 1. ], 
+					[s4^4, s4^3, s4^2 , s4 , 1. ], 
+					[s5^4, s5^3, s5^2 , s5 , 1. ] 	];
+	set(Sp,solver=sparsesolver);
+	/* the coefficient of the polynomial interpolation*/
+	real[int] px(5);
+	real[int] py(5);
+	/*Resolution of the linear systems*/
+	px=Sp^-1*X;		
+	py=Sp^-1*Y;
+	real dX = 4*px(0)*s3^3+3*px(1)*s3^2+2*px(2)*s3+px(3);
+	real dY = 4*py(0)*s3^3+3*py(1)*s3^2+2*py(2)*s3+py(3);
+	real ddX = 12*px(0)*s3^2+6*px(1)*s3+2*px(2);
+	real ddY = 12*py(0)*s3^2+6*py(1)*s3+2*py(2);
+	/* Courbature with x(s) and y(s) kxy = ( x'y'' -x''y' )/(x'^2+y'^2)^(3/2)*/
+	real kxy = (ddX*dY-dX*ddY)/(dX^2+dY^2)^(3./2.);
+	K0a[](Ns-1)=abs(kxy)*sign(K0a[](Ns-2)); /* warning change sign ! */
+	};
+	for(int kk=1;kk<Nsurface-1;kk++)
+	K0b[][kk] = N0x[][kk]/xsurf[][kk];
+	if(abs(xsurf[][0])<1e-8) {K0b[][0]=K0a[][0];} 
+	                    else {K0b[][0]=N0x[][0]/xsurf[][0];};
+	if(abs(xsurf[][Ns-1])<1e-8) {K0b[][Ns-1]=K0a[][Ns-1];} 
+	                       else {K0b[][Ns-1]=N0x[][Ns-1]/xsurf[][Ns-1];};	
+}	
+//EOM
+
+
+// Macro for output in StabFem format
+
+macro SFWriteMeshLin(filename,Thlin,xsurf,ysurf,S0,N0x,N0y,K0a,K0b)
+{
+            ofstream file(filename); 
+            int Nsurface = xsurf[].n;
+            string P1surf = "real."+xsurf[].n;
+			file << "Data generated by FreeFem++" << endl;
+			file << "Surface information for free-surface problems " << endl;
+    		file << "datatype FreeSurface" << endl;
+			file << "int nsurf "+P1surf+" rsurf "+P1surf+" zsurf "+P1surf+" S0 "+P1surf+" alphasurf "
+					+P1surf+" N0r "+P1surf+" N0z "+P1surf+" K0a "+P1surf+" K0b " << endl; 
+			file << Nsurface << endl << endl;		
+            for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << xsurf[](ksurf) << endl;} 
+            file << endl;
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << ysurf[](ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << S0[](ksurf) << endl;} 
+			file << endl;
+            for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << alphasurf[](ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << N0x[](ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << N0y[](ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << K0a[](ksurf) << endl;} 
+			file << endl;			
+			for(int ksurf=0;ksurf<Nsurface;ksurf++) { file << K0b[](ksurf) << endl;} 
+			file << endl;
+}
+//EOM	
+
+macro CheckGeom
+{
+cout << endl << " Check Geometry : " << endl << endl;
+cout << " x surf : " << xsurf[] << endl;
+cout << " y surf : " << ysurf[] << endl;
+cout << " S0 : " << S0[] << endl;
+fespace VhlinMACRO(Thlin,P1);
+VhlinMACRO alphaDEG = alphasurf*180/pi;
+cout << " alpha (DEG) : " << alphaDEG[] << endl;
+
+
+cout << endl << " Check Normal/Tangent vectors : " << endl << endl;
+cout << " N0x = " << N0x[] << endl;
+cout << " N0y = " << N0y[] << endl;
+
+VhlinMACRO normN = sqrt(N0x^2+N0y^2);
+cout << " normN = " << normN[] << endl;
+
+cout << endl << " Check Curvature components : " << endl << endl;
+cout << " K0a = " << K0a[] << endl;
+cout << " K0b = " << K0b[] << endl;
+}
+//EOM

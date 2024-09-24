@@ -1,0 +1,259 @@
+//
+//  PROGRAM WeaklyNonLinear_2D_SN.edp
+//	
+//	Weakly non linear analysis for stationary 2D incompressible flows.
+//  It determines the normal form of a saddle node bifurcation.
+//   
+//
+//  INPUT PARAMETERS : none
+//
+//
+//	INPUT FILES :
+//		BaseFlow.txt	
+//      EigenMode.txt
+//		EigenModeA.txt 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//      WNL.ff2m 
+//
+// 	ERROR MANAGEMENT : 
+//      if Newton iteration diverges, SelfConsistentMode.txt is not generated and "iter" parameter in Eigenmode.ff2m is -1.
+//
+
+
+
+//load "MUMPS_seq"
+include "SF_Geom.edp";
+include "StabFem.idp";
+
+/////////////////////////////////////////////////////////////////////////////////
+
+string symmetryBaseFlow = "S"; /// TO BE DONE IN A BETTER WAY
+string symmetry = "A"; /// TO BE DONE IN A BETTER WAY
+
+
+
+string normalisation;
+cout << " Normalisation choice ?  [none, L, E or V] " << endl << "         ( V = Velocity at on point (S&L) ; E = Energy (Mantic-lugo), L = lift force )" << endl;
+cin >> normalisation ;
+cout << " --> " << normalisation << endl;
+
+string AdjointType;
+cout << " What kind of adjoint ?  [dA or cA] " << endl 
+<< "           ( dA for discrete adjoint ; cA for continuous adjoint )" << endl;
+cin >> AdjointType ;
+cout << " --> "  << AdjointType << endl;
+
+real Recheck;
+cout << " Give a value of Reynolds number to generate 'guess'  fields for selfconsistent/HarmonicBalance  ? " 
+		<< endl << "       (type -1 if you don't want this)" << endl;
+cin >> Recheck;
+cout << " --> " << Recheck << endl;
+
+
+
+mesh th=readmesh(ffdatadir+"mesh.msh");                    ///// Read mesh
+//int bclat=4,bcinlet=1,bcoutflow=3,bcwall=2,bcaxis=6;
+
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////
+
+fespace Xh(th,P2);             ////// f.e. space for vel.
+fespace Mh(th,P1);            ////// f.e. space for pressure
+fespace XXMh(th,[P2,P2,P1]); ////// f.e. space for triplet [u,v,p]
+
+XXMh [ubx,uby,ubp]; // base flow 
+XXMh<complex> [u1x,u1y,u1p];    //eigenmode 
+XXMh<complex> [u1Cx,u1Cy,u1Cp];    //eigenmode conjugate   
+XXMh<complex> [u1Ax,u1Ay,u1Ap];    //Adjoint   
+XXMh<complex> [u1ACx,u1ACy,u1ACp];    //Conjugate of Adjoint  
+
+XXMh [uepsx,uepsy,uepsp]; // base flow correction
+XXMh<complex> [u20x,u20y,u20p], [u22x,u22y,u22p];    //terms |A|^2 and A^2
+
+
+XXMh [vx,vy,vp]; // test functions
+XXMh<complex> [vCx,vCy,vCp]; // test functions
+
+real Re, ReC, Omegax, omegaC, sigmaC;
+
+     
+////////////////////////////////////////////////////////////////////////////////
+
+macro div(u) (dx(u#x)+dy(u#y))//EOM macro for divergence 
+macro Conv(ua,ub,v) ( 
+              ((ua#x*dx(ub#x)+ua#y*dy(ub#x))+(ub#x*dx(ua#x)+ub#y*dy(ua#x)))*v#x 
+            + ((ua#x*dx(ub#y)+ua#y*dy(ub#y))+(ub#x*dx(ua#y)+ub#y*dy(ua#y)))*v#y 
+                    ) //EOM macro for mutual convection operator
+macro D(u) [[dx(u#x), .5*(dx(u#y)+dy(u#x))], [.5*(dx(u#y)+dy(u#x)), dy(u#y)]] 
+//EOM macro for rate-of-deformation tensor
+
+macro NS(nu,u,v) 
+		(
+		 -2*nu*(D(u):D(v))
+        + u#p*div(v)
+        + v#p*div(u)
+        - .5*Conv(u,u,v)
+        )
+//EOM
+     
+macro NSL(nu,U,u,v) 
+		(
+		-2*nu*(D(u):D(v))
+        + u#p*div(v)
+        + div(u)*v#p
+        - Conv(U,u,v)
+        )
+//EOM
+        
+macro Boundaryconditions(u,v,symmetry)
+	           on(bcinlet,u#x=0.0,u#y=0.0) 
+             + on(bcwall,u#x=0.0,u#y=0.0)
+             + int1d(th,bcaxis)(u#x*v#x*1e30*(symmetry=="A")+u#y*v#y*1e30*(symmetry=="S"))
+// 
+
+macro Lift(nu,u1,u2,p)   
+	(
+	int1d(th,2,21,22,23)(2*p*N.y)
+	+int1d(th,2,21,22,23)( -2*nu*(2*dy(u2)*N.y+(dx(u2)+dy(u1))*N.x))
+	)
+//
+macro Drag(nu,u1,u2,p)   
+	(
+	int1d(th,2,21,22,23)(2*p*N.x)
+	+int1d(th,2,21,22,23)( -2*nu*(2*dx(u1)*N.x+(dx(u2)+dy(u1))*N.y))
+	)
+//
+
+
+       
+
+
+{
+ifstream cbin(ffdatadir+"BaseFlow.txt");
+cbin >> ubx[] >> Re >> Omegax ;
+cout << "Drag of guess mean flow : " << Drag(1/Re,ubx,uby,ubp) << endl;
+}
+
+{
+cout << "Reading Eigenmode.txt" << endl;
+ifstream cbin(ffdatadir+"Eigenmode.txt");
+cbin >> u1x[]  >> sigmaC >> omegaC; 
+}
+
+
+{
+cout << "Reading EigenmodeA.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeA.txt");
+cbin >> u1Ax[] ; 
+}
+u1ACx[] = conj(u1Ax[]);
+
+
+
+
+if(normalisation=="none")
+	{ cout << " -> No normalization for the mode " << endl;}
+else if(normalisation=="L")
+	{
+		cout << " -> Normalisation of mode based on LIFT  " << endl;
+		real Liftguess = 0.5; // normalize so that lift is 0.5 ; total lift (including cc) is 1 ; lift coef. is .5
+		
+		cout << "  -> Fy = " << Liftguess  << endl;
+
+		cout << "Fy before renarmalisation : " << Lift(1/Re,u1x,u1y,u1p) << endl;
+		complex modenorm = Lift(1/Re,u1x,u1y,u1p);
+		u1x[] = Liftguess/modenorm*u1x[]; 
+			cout << "Fy after renarmalisation : " << Lift(1/Re,u1x,u1y,u1p) << endl;	
+	}	
+else if(normalisation=="E")
+		{
+		cout << " -> Normalisation of mode based on ENERGY OF PERTURBATION (Mantic-lugo convention)  " << endl;
+		real Eguess = 1;
+		cout << "  -> Energy = " << Eguess << endl;
+
+		cout << "Energy before renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;
+		complex modenorm = Lift(1/Re,u1x,u1y,u1p);
+		u1x[] = 1/modenorm*u1x[]; // first normalize so that imag part of lift is zero
+		modenorm = 2*sqrt(2*int2d(th)(abs(u1x)^2+abs(u1y)^2));
+		u1x[] = Eguess/modenorm*u1x[]; // then normalize so that || ums ||_L2 = 1/sqrt(2)
+		cout << "Energy after renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;	
+		}
+else if(normalisation=="V")
+		{
+			cout << " -> Normalisation of mode based on velocity at one point (Sipp & lebedev convention)  " << endl;
+		complex Vpoint = u1y(1,0); // convention of Sipp & Lebedev
+		cout << "Energy before renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;
+		complex modenorm = Lift(1/Re,u1x,u1y,u1p);
+		u1x[] = 0.4612/Vpoint*u1x[];  // convention of Sipp & Lebedev
+		cout << "Energy after renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;	
+		};
+
+
+u1Cx[] = conj(u1x[]);
+
+real nu = 1/Re;
+
+
+
+complex Cn;
+
+if(AdjointType=="cA") // continuous adjoint
+{
+Cn = int2d(th)(u1ACx*u1x+u1ACy*u1y);
+}
+else if(AdjointType=="dA") 
+{
+//Cn = u1ACx[]'*u1x[];  //// FLAVIO IS THAT REALLY WHAT YOU MEAN ???? I HAVE A DOUBT because this way of doing the product also involves the pressure components ...
+
+// FOR ME THE BEST WAY WOULD BE :
+
+// 
+//     varf b([ux,uy,up],[vx,vy,q]) = int2d(th)( (ux*vx+uy*vy) );
+//		matrix<complex> B= b(XXMh,XXMh,solver=CG);  //////// see freefem++doc.pdf for the solver
+//      Cn = u1ACx[]'*(B*u1x[]);     
+//      which is at the end equivalent to the continous product. Hence I keep
+Cn = int2d(th)(u1ACx*u1x+u1ACy*u1y);
+// FLAVIO WHAT DO YOU THINK ???
+
+}
+;
+
+
+
+
+cout << " Cn : " << Cn << endl;
+
+
+complex a0 = 1/Cn*int2d(th)(2*(D(ub):D(u1AC)));
+
+complex a2 = -1/Cn*int2d(th)(Conv(u1,u1,u1AC));
+	
+cout << "a0 : "  << a0 << " ; a2 = " << a2 << endl;
+
+
+cout << endl << endl << "######### SUMMARY : ##############" << endl << endl;
+
+
+
+//// GENERATE FILE WITH ALL COEFFS ; USEFUL FOR MATLAB DRIVER
+
+{
+ 		 ofstream file(ffdatadir+"WNL_results.ff2m");
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Coefficients of the Amplitude Equation obtained by Weakly Non Linear analysis" << endl;
+    	 file << "datatype WNL" << endl;
+	     file << "real Rec complex eigenvalue complex a0 complex a2" << endl << endl ; 
+	     file << ReC << endl 
+			  << 0 << endl << omegaC  << endl 
+			  << real(a0) << endl << imag(a0) << endl 
+			  << real(a2) << endl << imag(a2) << endl ;
+
+};
+
+	
+	
+	

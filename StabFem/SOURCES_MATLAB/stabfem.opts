@@ -1,0 +1,6 @@
+SF_PUBLISH:char:%s:
+freefemexecutable:char:%s:FreeFem++-mpi
+ffroot:char:%s:
+ffversion:double:%f:10000.000000
+ffmpiversion:double:%f:10000.000000
+solver:char:%s:default

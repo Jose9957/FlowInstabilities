@@ -1,0 +1,107 @@
+// File MappingDef_Rectangle.idp
+// This case corresponds to the mapping type "rectangle" to be used now in most cases.
+//
+// For proper operation this case requires the following parameters (in Mapping_Params.idp)
+//
+// real ParamMapCXinf; 	// Be consistent with the coordinate system. If x is negative, then so this value
+// real ParamMapXsup;	
+// real ParamMapCYinf; 	// Be consistent with the coordinate system. If y is negative, then so this value
+// real ParamMapYsup;	 
+// real ParamMapGCx;	
+// real ParamMapLCx;
+// real ParamMapGCy;	
+// real ParamMapLCy;	
+//
+// Gx and Hxinv are generic functions used for any coordinate. Then the name x in those functions is for a 
+// generic x_i coordinate. A user to use those functions must set the proper spatial coordinate.
+//
+//
+// Significance : the mapping will be applied outside of a central window (x,y) in [Xinf,Xsup] x [Yinf,Ysup]
+// with complex amplitude gammac and transition thickness Lc 
+
+
+// definition of the mapping in x direction (complex)
+
+func complex Gx(real xcoord, real Xinf, real Xsup, real LC, real GC)
+{ 
+if(xcoord>Xsup)
+	{ 
+		real distX = (xcoord-Xsup);
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distXTh);
+		return xcoord + xcoord*1i*GC*tanhxsq; 
+	} 
+else if (xcoord<Xinf)
+	{ 
+		real distX = (xcoord-Xinf);
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distX);
+		return xcoord + xcoord*1i*GC*tanhxsq; 
+	}
+else
+	{ return xcoord;} 
+};
+
+func complex Hxinv(real xcoord, real Xinf, real Xsup, real LC, real GC)
+{ 
+if(xcoord>Xsup)
+	{ 	
+		real distX = (xcoord-Xsup);
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distXTh);
+		real coshxsq = cosh(distXTh);
+		return 1 + 1i*GC*tanhxsq;  + 1i*(2*distX*xcoord)*GC/(LC^2*coshxsq^2); 
+	} 
+else if (xcoord<Xinf)
+	{ 
+		real distX = (xcoord-Xinf);
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distXTh);
+		real coshxsq = cosh(distXTh);
+		return 1 + 1i*GC*tanhxsq;  + 1i*(2*distX*xcoord)*GC/(LC^2*coshxsq^2); 
+	}
+else
+	{ 	
+		return 1;
+	};
+};
+
+
+func real InnerReg()
+{
+	if(x<ParamMapXsup && x>ParamMapCXinf && y < ParamMapYsup && y > ParamMapCYinf)
+		return 1.0;
+	else
+		return 0.0;
+}
+
+
+macro DEFMapping()
+cout << "## creating complex mapping metrics with macro DEFMapping ... ";
+p1<complex> theXphys,theRphys,theHxinv,theHrinv;
+theXphys = Gx(x,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx);
+theHxinv = Hxinv(x,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx);
+theRphys = Gx(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy);
+theHrinv = Hxinv(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy);
+cout << " DONE !" << endl;
+//EOM
+
+
+macro Xphys(x,y,ParamMap)  ( theXphys )  //EOM 
+macro dX(a) ( 1.0/theHxinv*dx(a) ) //EOM 
+macro Rphys(x,y,ParamMap)  ( theRphys  )  //EOM 
+macro dY(a) ( 1.0/theHrinv*dy(a) ) //EOM 
+macro JJ() (theHxinv*theHrinv) //EOM // Jacobian of the coordinate change 
+macro JJJ() (theRphys*theHxinv*theHrinv) //EOM // cylindrical Jacobian including geometric term
+
+
+//IFMACRO(!dX)
+//macro dX(a) 1/Hxinv(x,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx)*dx(a) //EOM 
+//macro dY(a) 1/Hxinv(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy)*dy(a) //EOM 
+//macro Xphys() Gx(x,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx) // EOM
+//macro Yphys() Gx(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy) // EOM
+//macro Rphys(x,y,ParamMap) Gx(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy) // EOM
+//macro JJ Hxinv(x,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx)*Hxinvy,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy) //EOM 
+//macro JJJ Gx(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy)*Hxinvx,ParamMapCXinf,ParamMapXsup,ParamMapLCx,ParamMapGCx)
+//*Hxinv(y,ParamMapCYinf,ParamMapYsup,ParamMapLCy,ParamMapGCy) //EOM  
+//ENDIFMACRO

@@ -1,0 +1,67 @@
+// File MappingDef_Circle.idp
+// This case corresponds to the mapping type "circle" to be used now in domains
+// with large distances.
+//
+// For proper operation this case requires the following parameters (in Mapping_Params.idp)
+//
+// real ParamMapRinf; 	// Radius of the circle CM def
+// real ParamMapGC;	
+// real ParamMapLC;
+//
+// Gx and Hxinv are generic functions used for any coordinate. Then the name x in those functions is for a 
+// generic x_i coordinate. A user to use those functions must set the proper spatial coordinate.
+//
+//
+// Significance : the mapping will be applied outside of a central window (x,y) in r=(0,R_0) 
+// where r=sqrt(x^2+y^2)
+// with complex amplitude gammac and transition thickness Lc 
+
+
+// definition of the mapping in x direction (complex)
+
+func complex Gx(real xcoord, real ycoord, real Rinf, real LC, real GC)
+{ 
+    real rdist = sqrt(xcoord^2+ycoord^2);
+    if(rdist>Rinf)
+        { 
+            real distX = (rdist-Rinf);
+            real distXTh = distX^2/LC^2;
+            real tanhxsq = tanh(distXTh);
+            return xcoord + xcoord*1i*GC*tanhxsq; 
+        } 
+    else
+        { return xcoord;} 
+};
+
+func complex Hxinv(real xcoord, real ycoord, real Rinf, real LC, real GC)
+{ 
+    real rdist = sqrt(xcoord^2+ycoord^2);
+    if(rdist>Rinf)
+        { 
+            real distX = (rdist-Rinf);
+            real distXTh = distX^2/LC^2;
+            real tanhxsq = tanh(distXTh);
+            real coshxsq = cosh(distXTh);
+            return 1 + 1i*GC*tanhxsq + 2*1i*GC*distX*xcoord^2/(LC^2*rdist*coshxsq^2); 
+        } 
+    else
+        { return 1;} 
+};
+
+
+IFMACRO(!dX)
+macro dX(a) 1/Hxinv(x,y,ParamMapRinf,ParamMapLC,ParamMapGC)*dx(a) //EOM 
+macro dY(a) 1/Hxinv(y,x,ParamMapRinf,ParamMapLC,ParamMapGC)*dy(a) //EOM 
+
+macro Xphys() Gx(x,y,ParamMapRinf,ParamMapLC,ParamMapGC) // EOM
+macro Yphys() Gx(y,x,ParamMapRinf,ParamMapLC,ParamMapGC) // EOM
+
+macro JJ Hxinv(x,y,ParamMapRinf,ParamMapLC,ParamMapGC)*Hxinv(y,x,ParamMapRinf,ParamMapLC,ParamMapGC) //EOM 
+
+macro JJJ Gx(y,x,ParamMapRinf,ParamMapLC,ParamMapGC)*Hxinv(x,y,ParamMapRinf,ParamMapLC,ParamMapGC)*Hxinv(y,x,ParamMapRinf,ParamMapLC,ParamMapGC) //EOM  
+ENDIFMACRO
+cout << "#######################################################" << endl << endl;
+cout << "####    Using COMPLEX MAPPING type JET " << endl << endl;
+cout << " Parameters : " << endl;
+cout << "#######################################################" << endl << endl;
+

@@ -1,0 +1,20 @@
+if (exist('OCTAVE_VERSION', 'builtin')~=0)
+
+  if exist([fileparts(fileparts(pwd)) '/SOURCES_OCTAVE'],'dir')
+  %[fileparts(fileparts(pwd)) '/SOURCES_OCTAVE']
+    addpath([fileparts(fileparts(pwd)) '/SOURCES_OCTAVE']);
+
+  elseif exist([fileparts(fileparts(fileparts(pwd))) '/SOURCES_OCTAVE'],'dir')
+  %[fileparts(fileparts(fileparts(pwd))) '/SOURCES_OCTAVE']
+    addpath([fileparts(fileparts(fileparts(pwd))) '/SOURCES_OCTAVE']);
+
+  elseif exist([fileparts(pwd) '/SOURCES_OCTAVE'],'dir')
+  %[fileparts(pwd) '/SOURCES_OCTAVE']
+    addpath([fileparts(pwd) '/SOURCES_OCTAVE']);
+  
+  else
+    warning(' in SOURCES_MATLAB/MPKG_ADD : not found SOURCES_OCTAVE')
+  end
+  
+end
+ 

@@ -1,0 +1,182 @@
+//
+// Program Solve_ElectricPotential_Lagrange.edp
+// This program solves an electric potential problem with the form :
+//
+// Delta Phi = 0
+// with boundary conditions ;
+// Phi = 0 on "collector" (label 2, possibly 201,202,203...)
+// Phi = 1 on "emitter" (label 21,22,23,...)
+// Neumann on boundary label 5 (or others)
+// Periodicity on labels 23 and 44 (if present in mesh)
+
+// Input parameters (command line or piped):
+// Input files :
+//  mesh.msh
+// Output files :
+//  Phicrit.txt
+//  Phicrit.ff2m
+//
+// This program belongs to the StabFem project distributed under gnu licence.
+//
+// History : - this program was initially developed by Sergiu to predict critical potential for corona discharge.
+//           - 02/01/21 : Updated to incorpore Boundary conditions as Lagrange multiplier to "smooth" the results  
+
+
+
+cout << "Loading parameters, macros & functions for DC corona..." <<endl;
+//load "MUMPS"
+load "Element_P3";
+load "lapack"
+
+
+include "StabFem.idp"
+
+// Chapter 1 : parameters
+real Eac, Pe, Vc;
+
+
+
+//cout << " Enter Vc : " ;
+//cin >> Vc;
+//cout << Vc << endl;
+Vc = 0;
+
+
+//Chaputre 2 /MAcros
+
+//INPUT MACROS FUNCTIONS
+func r = sqrt(x^2+y^2);
+macro grad(u) [dx(u),dy(u)] // gradient
+macro ngrad(u) [dx(u),dy(u)]'*[N.x,N.y] // gradient to local normal N.
+macro norm(phi) sqrt(dx(phi)^2+dy(phi)^2) //electric field amplitude
+macro gradgrad(u,v) (dx(u)*dx(v)+dy(u)*dy(v))//
+macro ds(u) (N.y*dx(u) - N.x*dy(u))//EOM
+
+
+
+mesh Th2,THSH;
+Th2 = readmesh(ffdatadir+"mesh.msh");
+THSH = emptymesh(Th2);
+
+
+
+//FESPACEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE
+fespace Vh2(Th2,P2); // Fspace for Phi
+// fespaces for volumic fields with periodic condition on 44 and 43
+fespace VRh( THSH,P1);  // Fspace for Lagrange
+
+fespace Xh2IO(Th2,P2); 
+// this one is used for input/output (drivers do not support P3)
+int NPhi = Vh2.ndof ;     //nombre de points dans le maillage pour phi
+int NLambda = VRh.ndof ;     //nombre de points dans le maillage pour phi --> Problème trop de point puisqu'on prend en compte toute les frontières du domaine ? 
+
+
+Vh2 Uphi;       //initial function Phi
+VRh Lagrange;   //Initial function for Lagrange Multipliers
+
+
+// Poisson Homogene to initialize the harmonic potential -------------------
+// Left Hand side Definitions
+varf Phi(dphi,Phicross,strategy=1)= //initialization for outer potential
+    -int2d(Th2)(gradgrad(dphi,Phicross));
+
+varf PhiLambda(dphi,Lambdacross)=int1d(Th2,21,22,23,24,25,26,27,28,29)(Lambdacross*dphi)+int1d(Th2,2,201,202,203)(Lambdacross*dphi);
+
+varf LambdaPhi(dLambda,Phicross)=int1d(THSH,21,22,23,24,25,26,27,28,29)(Phicross*dLambda)+int1d(THSH,2,201,202,203)(Phicross*dLambda);
+
+varf Lambda(dLambda,Lambdacross)=int1d(THSH)(dLambda*Lambdacross*1e-20); // Desingularization Term
+
+// Right hand side Definitions
+//varf R_Phi=0;
+varf RPhiLambda(dLambda,Lambdacross)=int1d(THSH,21,22,23,24,25,26,27,28,29)(Lambdacross*1.);
+//varf R_Lambda=0;
+
+
+//Matrix Building
+real[int] RHS(NPhi+NLambda),Inconnue(NPhi+NLambda); //Right hand side  and inconnue vector definition
+
+matrix A=Phi(Vh2,Vh2);
+matrix B=LambdaPhi(VRh,Vh2);
+matrix C=PhiLambda(Vh2,VRh);
+matrix D=Lambda(VRh,VRh);
+
+// Left Hand Side Building
+matrix LHS= [[  A   ,   B   ],
+             [  C   ,   D   ] ];
+
+set(LHS , solver=sparsesolver);
+
+// Right Hand Side Building
+RHS(0:NPhi-1)               =   0;
+RHS(NPhi:NPhi+NLambda-1)    =   RPhiLambda(0,VRh);
+
+//System Inversion
+Inconnue=LHS^(-1)*RHS;
+
+//Results Allocation
+Uphi[] = Inconnue(0:NPhi-1);
+Lagrange[] = Inconnue(NPhi:NPhi+NLambda-1);
+
+//Results Recuperation
+real E1 = int1d(THSH,21)(Lagrange)/int1d(THSH,21)(1); // Electric field amplitude at the first emittor
+real E2 = int1d(THSH,22)(Lagrange)/int1d(THSH,22)(1); // Electric field amplitude at the second emittor
+real E3 = int1d(THSH,23)(Lagrange)/int1d(THSH,23)(1); // Electric field amplitude at the Third emittor 
+//real E4 = int1d(THSH,24)(Lagrange)/int1d(THSH,24)(1); // Electric field amplitude at the Third emittor 
+//real E5 = int1d(THSH,25)(Lagrange)/int1d(THSH,25)(1); // Electric field amplitude at the Third emittor 
+//real E6 = int1d(THSH,26)(Lagrange)/int1d(THSH,26)(1); // Electric field amplitude at the Third emittor 
+//real E7 = int1d(THSH,27)(Lagrange)/int1d(THSH,27)(1); // Electric field amplitude at the Third emittor 
+//real E8 = int1d(THSH,28)(Lagrange)/int1d(THSH,28)(1); // Electric field amplitude at the Third emittor 
+//real E9 = int1d(THSH,29)(Lagrange)/int1d(THSH,29)(1); // Electric field amplitude at the Third emittor 
+real Phia1=(int1d(Th2,21)(Uphi)/int1d(Th2,21)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E1-C
+real Phia2=(int1d(Th2,22)(Uphi)/int1d(Th2,22)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E2-C
+real Phia3=(int1d(Th2,23)(Uphi)/int1d(Th2,23)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia4=(int1d(Th2,24)(Uphi)/int1d(Th2,24)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia5=(int1d(Th2,25)(Uphi)/int1d(Th2,25)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia6=(int1d(Th2,26)(Uphi)/int1d(Th2,26)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia7=(int1d(Th2,27)(Uphi)/int1d(Th2,27)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia8=(int1d(Th2,28)(Uphi)/int1d(Th2,28)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+//real Phia9=(int1d(Th2,29)(Uphi)/int1d(Th2,29)(1.))-int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.); // Electrical potential beetween E3-C
+
+//cout << "Verification PhiC,PhiE1, PhiE2( should be 0 , 1 , 1 ) :" << (int1d(Th2,2)(Uphi)/int1d(Th2,2)(1.)) << " , " <<(int1d(Th2,21)(Uphi)/int1d(Th2,21)(1.)) << " , " <<(int1d(Th2,22)(Uphi)/int1d(Th2,22)(1.)) << " , " <<  end;
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//      CHAPTER 6 : PostProcessing
+//
+      IFMACRO(!SFWriteData)
+macro SFWriteData(filename,U,typeFlow,iter)
+    {
+        ofstream file(filename);
+    file << "### Data generated by Freefem++ ; " << endl;
+        file << "BaseFlow for an electric discharge problem with Kaptsov approximation" << endl;
+        file << "datatype Phicrit datastoragemode ReP2 datadescriptors phi" << endl;
+    file << "real* Eem real* Eem2 real* Eem3 real* Phia1 real* Phia2 real* Phia3 " << endl ;
+        file << E1 << endl;
+        file << E2 << endl;
+        file << E3 << endl;
+        file << Phia1 << endl;
+        file << Phia2 << endl;
+        file << Phia3 << endl;
+
+    };
+//EOM
+ENDIFMACRO
+
+
+
+
+
+// conversion to a format compatible with drivers (P3 not available)        
+        Xh2IO UIOphi;
+        UIOphi = Uphi;
+plot(UIOphi,wait=true,fill=true,value=true);
+cout<<"UIOphi"<<UIOphi.n<<endl;
+        {
+          ofstream file(ffdatadir+"Phicrit.txt"); // file in .txt format for FreeFem solvers
+          file << UIOphi[];
+        };
+
+
+    SFWriteData(ffdatadir+"Phicrit.ff2m",UIO,"Phicrit",k); // file in .ff2ml format for StabFem driver
+
+cout << "$$$$ SUCESSFULLY LEAVING Newton_Kaptsov.edp "  << endl;

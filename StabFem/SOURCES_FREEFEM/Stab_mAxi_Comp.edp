@@ -1,0 +1,729 @@
+//
+//  PROGRAM Stab_mAxi_Comp.edp
+//	
+//	Performs the linear stability analysis of a 2D compressible subsonic flow
+//   
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re, Ma, shift(Re,im) , Symmetry, Type, nev 
+//
+//   this solver will use Arnoldi
+//
+//	INPUT FILES :
+//		BaseFlow.txt	-> base flow 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//
+//  	Eigenmode##.txt   (txt format for FreeFem)
+//      Eigenmode##.ff2m  (ff2m format for stabfem)
+//
+// in all modes :
+//		Spectrum.txt -> All computed Eigenvalues
+//
+// 	ERROR MANAGEMENT : 
+//      if Arnoldi method fails, TODO: Not handled yet
+//
+// Restructured 30/12/2020 | 
+// Updated by Javier Sierra.
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		0 : Headers (Include/load & global macros)		
+//
+
+macro def(i) [i,i#B,i#C,i#D,i#E,i#F]// EOM    
+macro init(i)[i,i,i,i,i,i]// EOM         
+include "StabFem.idp";
+macro mpicout() if(mpirank==0) cout //EOF // Useful for outputs in the terminal
+include "getARGV.idp" // Arguments instead of pipeline
+//include "Param_Mapping.edp";
+
+/////////////////////////////////////////////////////////////////////////////////
+
+mpiComm comm(mpiCommWorld, 0, 0);
+
+int mpicommSize = mpiSize(mpiCommWorld);
+int mpirank = mpiRank(mpiCommWorld);
+int status; 
+
+mpicout << "MPI Comm size = " << mpicommSize << endl;
+mpicout << "MPI rank in Comm = " << mpiRank(comm) << endl;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		1 : Parallel related macros		
+//
+
+
+/* Definition of Local mesh (without overlapping) */
+/*
+IFMACRO(!LocalMeshNonOverlapped)
+macro LocalMeshNonOverlapped(thLocalOverlapped,thLocalNonOverlapped,partUnity,PkFEM,Ddist,interArray,sSplit,restrictIdx)
+{
+    if(mpirank == 0)
+        partitionerSeq(partUnity[], thLocalOverlapped, mpisize); 
+    partitionerPar(partUnity[], thLocalOverlapped, mpiCommWorld, size);
+    buildWithPartitioning(thLocalOverlapped, partUnity[], sSplit, interArray, Ddist, PkFEM, mpiCommWorld);
+    partUnity = partUnity; 
+    thLocalNonOverlapped = trunc(thLocalOverlapped, abs(partUnity - mpirank) < 1e-1);
+    partUnity = abs(partUnity - mpirank) < 1e-1 ? 1 : 0;
+}
+//EOM
+ENDIFMACRO
+*/
+
+IFMACRO(!LocalMeshNonOverlapped)
+macro LocalMeshNonOverlapped(thLocalOverlapped,thLocalNonOverlapped,partUnity,PkFEM,Ddist,interArray,sSplit,restrictIdx)
+{
+
+	int[int] n2o;
+	NewMacro thN2O()n2o EndMacro
+    if(mpirank == 0)
+        partitionerSeq(partUnity[], thLocalOverlapped, mpisize); 
+    partitionerPar(partUnity[], thLocalOverlapped, mpiCommWorld, size);
+    NewMacro ThName#UserPartitioning() partUnity[] EndMacro
+    buildDmesh(thLocalOverlapped)
+    restrictIdx = restrict(XXXxxxH, XXXxxxHG, n2o);
+    thLocalNonOverlapped = trunc(thLocalOverlapped, abs(partUnity - mpirank) < 1e-1);
+    partUnity = abs(partUnity - mpirank) < 1e-1 ? 1 : 0;
+    createMat(th, A, PkFEM);
+    /* partUnity[] = A.D; */
+}
+//EOM
+ENDIFMACRO
+
+/* Macro to perfom a reduction to rank == 0 of arithmetic (real or complex) Pk FEM fields */
+IFMACRO(!SFReduceFespace)
+macro SFReduceFespace(fieldth,fieldGlobthG,arithmetic)
+{
+	XXXxxxHG<arithmetic> defU3d(fieldLocthG);
+	XXXxxxH<arithmetic> defU3d(fieldLocthL);
+	XH partP2 = part;  
+	Xh partP1 = part;
+	/* Restrict to non overlapping domain */
+	defU3d(fieldLocthL) = [fieldth#x*partP2,fieldth#y*partP2,fieldth#z*partP2,fieldth#p*partP1,fieldth#T*partP1,fieldth#rho*partP1];
+	fieldLocthG#x[](R) = fieldLocthL#x[];
+	/* Reduce(sum) on proc == 0 */
+	mpiReduce(fieldLocthG#x[], fieldGlobthG#x[], processor(0, comm), mpiSUM); 
+	mpiReduce(fieldLocthG#y[], fieldGlobthG#y[], processor(0, comm), mpiSUM);
+	mpiReduce(fieldLocthG#z[], fieldGlobthG#y[], processor(0, comm), mpiSUM);
+	mpiReduce(fieldLocthG#p[], fieldGlobthG#p[], processor(0, comm), mpiSUM);
+	mpiReduce(fieldLocthG#T[], fieldGlobthG#T[], processor(0, comm), mpiSUM);
+	mpiReduce(fieldLocthG#rho[], fieldGlobthG#rho[], processor(0, comm), mpiSUM);
+}//EOM
+ENDIFMACRO
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		2 : Definition of parameters		
+//
+
+
+/* Physical parameters */
+real Re,Reans,Ma,Maans; // Reynolds and Mach numbers
+real gamma; // Adiabatic coefficient
+real Pr; // Prandtl number
+real nu; // Dynamic viscosity (it should be mu but we keep incompressible convention)
+complex shiftOP, shift; // Spectral Shift
+real shiftr,shifti; // Components of the spectral shift
+int mComp; // Azimuthal component
+string iadjoint; // Direct ("D") or Adjoint ("A")
+int nev, ncv; // number of eigenvalues, cardinal of Krylov Basis and number of eigenvalues computed
+string modeEig; // Name of the output file
+string namefile; // Temporary variable for the name of the output file
+bool SpongeActive; // Sponge of buffer region (customizable | Deactivated by default)
+string 	sparamsDirect = "-pc_type lu -pc_factor_mat_solver_type mumps ";
+string ssparams; // String of paramters of the eigenvalue solver
+int nComputed; // Number of eigenvalues computed by the eigenvalue solver
+/* Variable visocisty with temperature */
+int viscosityTemperature; // Dynamic viscosity dependence on temperature (0-off,1-on)
+real STemperature; // The Sutherland temperature: 110.4/273.15 for air
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		3 : Defintion of FEM spaces (lecture of mesh)		
+//
+
+
+func Pk = [P2, P2, P2, P1, P1, P1];
+func Pk2d = [P2, P2, P1, P1, P1];
+
+meshN th, thG, thNo;
+if(mpirank==0)
+  th=readmesh(ffdatadir+"mesh.msh"); /* global mesh read on rank 0 */
+broadcast(processor(0, mpiCommWorld), th);     // global mesh broadcasted to all ranks
+thG=th; /* Global mesh */
+
+/* Definition of FEspaces */
+fespace XH(th,P2);
+fespace XHG(th,P2);
+fespace XHNo(thNo,P2);
+
+fespace Xh(th,P1);
+fespace XhG(th,P1);
+fespace XhNo(thNo,P1);
+
+fespace Ph(th, P0);
+fespace PhG(thG, P0);
+fespace PhNo(thNo, P0);
+
+fespace XXxxxH(th,Pk2d);   //   Local mesh (overlapped) : pres P1 + vel 2x P2 + temp P1 + dens P1
+fespace XXxxxHG(thG,Pk2d); //   Global mesh: pres P1 + vel 2x P2 + temp P1 + dens P1
+fespace XXxxxHNo(thNo,Pk2d); // Local mesh (without overlapping): pres P1 + vel 2x P2 + temp P1 + dens P1
+
+fespace XXXxxxH(th,Pk);   //   Local mesh (overlapped) : pres P1 + vel 3x P2 + temp P1 + dens P1
+fespace XXXxxxHG(thG,Pk); //   Global mesh: pres P1 + vel 3x P2 + temp P1 + dens P1
+fespace XXXxxxHNo(thNo,Pk); // Local mesh (without overlapping): pres P1 + vel 3x P2 + temp P1 + dens P1
+
+/* Definition of Field definition macros */
+macro defU3d(u)[u#x,u#y,u#z,u#p,u#T,u#rho]//EOF  
+macro defU2d(u)[u#x,u#y,u#p,u#T,u#rho]//EOF  
+
+/* Restriction */ 
+
+int[int][int] intersection; /* local-to-neighbors renumbering */
+real[int] DDD; /* partition of unity */
+int s = getARGV("-meshSplit",1);; /* refinement factor */
+
+/* Create thNo mesh: Local mesh (without overlapping) -- Another option use Dmesh */
+
+Ph part;
+int[int] R;
+Mat<complex> A;
+LocalMeshNonOverlapped(th,thNo,part,Pk,DDD,intersection,s,R)
+/* Definition of Vector fields */
+XXxxxHG defU2d(U0G); // Axi-symmetric base flow
+XXXxxxHG defU3d(UbG); // Global solution field
+XXXxxxH defU3d(Ub);  // Local (overlapped) solution field 
+
+XXXxxxH<complex> defU3d(uMode);
+XXXxxxHG<complex> defU3d(uModeG);
+
+XH AMPFORCE;
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		4a : Customizable macros for the variational formulation	
+//
+//
+
+/* Customizable definition of the Reynolds number -- dynamic viscosity (it should be mu, however nu as in the incompressible) */
+IFMACRO(!SFReCustom)
+macro SFReCustom nu=1./Re; //EOM
+ENDIFMACRO
+
+/* Provides access to the ReNumber in case of use for Boundary Conditions */
+IFMACRO(!ReNumber)
+macro ReNumber() Re // EOM For BC
+ENDIFMACRO
+
+/* Provides access to the MachNumber in case of use for Boundary Conditions */
+IFMACRO(!MachNumber)
+macro MachNumber() Ma // EOM For BC
+ENDIFMACRO
+
+/* Definition of macros for variational formulations */ 
+
+
+/* Definition of macros for variational formulations */ 
+
+func real SutherlandLaw(real mu0, real S, real T)
+{
+	// T_ref = 1, therefore S = S_dim/T_ref
+	real muViscosity = mu0*(T)^(3/2)*(1.0+S)/(T+S);
+	return muViscosity;
+}
+
+func real DSutherlandLawDT(real mu0, real S, real T)
+{
+	// T_ref = 1, therefore S = S_dim/T_ref
+	real dmudT = ((mu0/2)*(1+S)*(T+3*S)/(T+S)^2)*sqrt(T);
+	return dmudT;
+}
+
+func real funcmuT (real mu0, real S, real T)
+{
+	real muViscosity;
+
+	if(viscosityTemperature == 1)
+	{
+		muViscosity = SutherlandLaw(mu0, S, T);
+	}
+	else
+	{
+		muViscosity = mu0;
+	}
+
+	return muViscosity;
+}
+
+func real funcDmuDT (real mu0, real S, real T)
+{
+	real DmuViscosityDT;
+
+	if(viscosityTemperature == 1)
+	{
+		DmuViscosityDT = DSutherlandLawDT(mu0, S, T);
+	}
+	else
+	{
+		DmuViscosityDT = 0.0;
+	}
+
+	return DmuViscosityDT;
+}
+
+
+/* Coordinate system variables */ 
+
+IFMACRO(!Yphys)
+macro Yphys() y //EOM
+ENDIFMACRO
+
+IFMACRO(!Xphys)
+macro Xphys() x //EOM
+ENDIFMACRO
+
+/* Jacobian of the system of coordinates */
+
+IFMACRO(!JJJ)
+macro JJJ() Yphys //EOM
+ENDIFMACRO
+/* Complex mapping derivarive with respect to x */
+
+IFMACRO(!dX)
+macro dX(a) dx(a) // EOM
+ENDIFMACRO
+
+/* Complex mapping derivarive with respect to y */
+
+IFMACRO(!dY)
+macro dY(a) dy(a) //EOM
+ENDIFMACRO
+
+/* Differential forms */
+
+/* Differential forms (3d -- with harmonic azimuthal component) */
+
+macro div(im,u) ((dX(u#x)+dY(u#y)+u#y/Yphys+im/Yphys*u#z))// macro for divergence 
+macro ugradf(im,u,f) ((u#x*dX(f)+u#y*dY(f) + im/Yphys*u#z*f))    //
+macro termnonlinear(im,u,v,w) ((w#x*(u#x*dX(v#x)+u#y*dY(v#x)+im*u#z*v#x/Yphys)
+								+w#y*(u#x*dX(v#y)+u#y*dY(v#y)+im*u#z*v#y/Yphys-u#z*v#z/Yphys)
+								+w#z*(u#x*dX(v#z)+u#y*dY(v#y)+im*u#z*v#z/Yphys+u#z*v#y/Yphys))) //
+macro Grad(im,u) [[dX(u#x),dX(u#y),dX(u#z)],
+			   [dY(u#x),dY(u#y),dY(u#z)],
+			   [im/Yphys*u#x,im/Yphys*u#y-u#z/Yphys, im/Yphys*u#z+u#y/Yphys]]//EOM
+macro Strain(im,u) [	
+				[dX(u#x), 				.5*(dX(u#y)+dY(u#x)),  .5*(im/Yphys*u#x+dX(u#z)) ], 
+				[.5*(dX(u#y)+dY(u#x)), 	dY(u#y),				.5*(im/Yphys*u#y-u#z/Yphys+dY(u#z))],
+				[.5*(im/Yphys*u#x+dX(u#z)),  .5*(im/Yphys*u#y-u#z/Yphys+dY(u#z)), im/Yphys*u#z+u#y/Yphys]
+				] // macro for rate-of-deformation tensor
+macro gradgrad(ima,imb,u,v)(dX(u)*dX(v)+dY(u)*dY(v)+(ima*imb)/(Yphys*Yphys)*u*v)//EOM
+
+/* Differential forms (3d -- with harmonic azimuthal component) */
+
+macro divAxi(u) ((dX(u#x)+dY(u#y)+(u#y)/Yphys))   //EOM
+macro ugradfAxi(u,f) ((u#x*dX(f)+u#y*dY(f)))    //
+macro termnonlinearAxi(u,v,w) ((w#x*(u#x*dX(v#x)+u#y*dY(v#x))+w#y*(u#x*dX(v#y)+u#y*dY(v#y)))) //
+macro GradAxi(u) [[dX(u#x),dX(u#y),u#x-u#x],[dY(u#x),dY(u#y),u#x-u#x],[u#x-u#x,u#x-u#x,u#y/Yphys]]//EOM
+macro StrainAxi(u)[[dX(u#x),0.5*(dX(u#y)+dY(u#x)),u#x-u#x],[0.5*(dX(u#y)+dY(u#x)),dY(u#y),u#x-u#x],[u#x-u#x,u#x-u#x,u#y/Yphys]]//EOM
+macro gradgradAxi(u,v)(dX(u)*dX(v)+dY(u)*dY(v))//EOM
+
+/* Navier Stokes Fourier derivative (jacobian) -- bilinear forms */
+
+IFMACRO(!muTemperatureNL)
+macro muTemperatureNL(u) ( funcmuT(1/Re,STemperature,u#T) ) // EOM 
+ENDIFMACRO
+
+IFMACRO(!muTemperatureLIN)
+macro muTemperatureLIN(U,du) ( funcDmuDT(1/Re,STemperature,U#T)*du#T ) // EOM 
+ENDIFMACRO
+
+
+IFMACRO(!ContinuityResidualLNS)
+macro ContinuityResidualLNS(U,u,v) ( v#rho*(u#rho*divAxi(U)+U#rho*div(1i*mComp,u)+ugradf(1i*mComp,U,u#rho)+ugradfAxi(u,U#rho)) ) // EOM
+ENDIFMACRO
+
+IFMACRO(!MomemtumEquationLNS)
+macro MomemtumEquationLNS(U,u,v) ( U#rho*termnonlinearAxi(u,U,v)+u#rho*termnonlinearAxi(U,U,v)+U#rho*termnonlinear(1i*mComp,U,u,v)
+-u#p*div(-1i*mComp,v)
++2.0*muTemperatureNL(U)*(Strain(1i*mComp,u):Grad(-1i*mComp,v))  - muTemperatureNL(U)*2.0/(3.0)*(div(1i*mComp,u)*div(-1i*mComp,v)) 
++2.0*muTemperatureLIN(U,u)*(StrainAxi(U):Grad(-1i*mComp,v))  - muTemperatureLIN(U,u)*2.0/(3.0)*(divAxi(U)*div(-1i*mComp,v)) 
+) // EOM
+ENDIFMACRO
+
+IFMACRO(!EnergyEquationLNS)
+macro EnergyEquationLNS(U,u,v) ( 
+v#T*(
+		u#rho*ugradfAxi(U,U#T)+U#rho*ugradf(1i*mComp,U,u#T)
+	+U#rho*ugradfAxi(u,U#T)+(gamma-1)*(divAxi(U)*(u#rho*U#T+U#rho*u#T) 
+	+U#rho*U#T*div(1i*mComp,u))
+	-gamma*(gamma-1.0)*Ma^2*muTemperatureNL(U)*( 2.0*((Strain(1i*mComp,u):StrainAxi(U))+(StrainAxi(U):Strain(1i*mComp,u)))
+	-2.0/3.0*(2.0*divAxi(U)*div(1i*mComp,u)) )
+	-gamma*(gamma-1.0)*Ma^2*muTemperatureLIN(U,u)*( ((StrainAxi(U):StrainAxi(U)))-2.0/3.0*(divAxi(U)*divAxi(U)) )
+)
++gamma*muTemperatureNL(U)/(Pr)*gradgrad(1i*mComp,-1i*mComp,u#T,v#T)
++gamma*muTemperatureLIN(U,u)/(Pr)*gradgradAxi(U#T,v#T)
+) // EOM
+ENDIFMACRO
+		  
+IFMACRO(!StateEquationLNS)
+macro StateEquationLNS(U,u,v) ( v#p*(gamma*Ma^2*u#p-(u#rho*U#T+U#rho*u#T)) ) // EOM
+ENDIFMACRO
+
+
+IFMACRO(!OperatorLNS)
+macro OperatorLNS(U,u,v) ( JJJ*(ContinuityResidualLNS(U,u,v) + MomemtumEquationLNS(U,u,v) + EnergyEquationLNS(U,u,v) + StateEquationLNS(U,u,v)) ) // EOM
+ENDIFMACRO
+
+/* End of Navier Stokes Fourier (jacobian) -- bilinear forms */
+
+/* Boundary conditions -- generic */ 
+
+IFMACRO(!BoundaryconditionsStability3D)
+macro BoundaryconditionsStability3D(du,us)
+	           on(1,dux#=0,du#y=0.0,du#z=0.0,du#T=0.0,du#rho=0.0)
+	         + on(3,dux#=0,du#y=0.0,du#z=0.0,du#T=0.0,du#rho=0.0)
+             + on(2,du#x=0.0,du#y=0.0,du#z=0.0)
+             + on(6,du#y=0.0)
+//EOM
+ENDIFMACRO
+
+/* End of Boundary conditions -- generic */ 
+
+/* Inner product */
+
+IFMACRO(!InnerProduct)
+macro InnerProduct(U,u,v) ( U#rho*(u#x*v#x + u#y*v#y + u#z*v#z + u#T*v#T) + u#rho*v#rho ) // EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFSPONGE)
+macro SFSPONGE()
+	func real AmpSponge(real M, real xinf, real xsup, real yinfsup)  
+	{
+	  if(M>0)
+	    return abs(1.+1./M)*(x>xsup)*(alpha*(x-xsup))+abs(1.-1./M)*(x<xinf)*(alpha*(xinf-x))+abs(1./M)*(abs(y)>yinfsup)*(alpha*(abs(y)-yinfsup));
+	  else
+	    return 0.0;
+	}
+	AMPFORCE=AmpSponge(Ma,xinfm,xinfv,yinf);
+//EOM
+ENDIFMACRO
+
+IFMACRO(!NormalizeMode)
+macro NormalizeMode(u,U)
+{
+	complex NormSqGlob;
+	complex NormSqLoc = intN(thNo)( (JJJ*U#rho*(abs(u#x)^2+abs(u#y)^2+abs(u#z)^2+abs(u#T)^2)+abs(u#rho)^2) );
+	mpiAllReduce(NormSqLoc, NormSqGlob, mpiCommWorld, mpiSUM);
+	complex NormGlob = sqrt(NormSqGlob);
+	u#x[] = u#x[]/NormGlob;
+}
+//EOM
+ENDIFMACRO
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		4b : Customizable macros for input/output	
+//
+//
+
+
+IFMACRO(!SFParameters)
+macro SFParameters()
+gamma=getARGV("-gamma",1.4); // Adiabatic coefficient
+Pr=getARGV("-Pr",0.71); // Prandtl number
+Re=getARGV("-Re",50.0); /* Reynolds number */
+Ma=getARGV("-Ma",0.01); /* Mach number */
+nev = getARGV("-nev",5); /* Number of eigenvalues to be computed */
+shiftr=getARGV("-shiftr",0.0); /* Real component of the spectral shift */
+shifti=getARGV("-shifti",0.0); /* Imaginary component of the spectral shift */
+shift = shiftr+1i*shifti;
+mComp = getARGV("-m",0); /* Azimuthal component */
+iadjoint = getARGV("-iadjoint","D"); /* Either Direct ("D") or Adjoint ("A") */
+SpongeActive = getARGV("-SpongeActive",1); /* Bool for activation of the sponge/buffer layer */
+/* Variable visocisty with temperature */
+viscosityTemperature = getARGV("-viscosityTemperature",1); // Dynamic viscosity dependence on temperature (0-off,1-on)
+STemperature=getARGV("-STemperature",0.40417353102690834); // The Sutherland temperature: 110.4/273.15 for air
+SFReCustom; /* Customizable Reynolds number definition */
+SFSPONGE; /* Customizable sponge (If you decide to use it) */
+// EOM
+ENDIFMACRO
+
+IFMACRO(!SFParametersOutput)
+macro SFParametersOutput()
+mpicout << " ### PARAMETERS SELECTED : " << endl;
+mpicout << " Re = " << Re << endl;
+mpicout << " Ma = " << Ma << endl;
+mpicout << " Shift = " << shiftr+1i*shifti << endl; 
+mpicout << " Azimuthal component (m) = " << mComp << endl; 
+mpicout << " Method = " << iadjoint << endl; 
+mpicout << " gamma = " << gamma << endl;
+mpicout << " Pr = " << Pr << endl;
+//EOM
+ENDIFMACRO
+
+
+/* if your want something else this macro may be redefUined in your Macro_StabFem.idp */
+IFMACRO(!DefaultGuessForNewton) 
+macro DefaultGuessForNewton() defU2d(U0G) = [0.0,0.0,0.0,1.0,1.0]; //EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFReadBaseFlow)
+macro SFReadBaseFlow()
+if(mpirank==0)
+{
+	int testCB = exec("ls "+ffdatadir+"/BaseFlow.txt");
+	if (testCB!=0)
+	{
+		mpicout << "$$ No file BaseFlow.txt : starting from arbitrary initial condition" << endl;
+		DefaultGuessForNewton;
+	} 
+	else
+	{
+	    mpicout << "$$ Reading file BaseFlow.txt" << endl;
+		ifstream file(ffdatadir+"BaseFlow.txt");
+		file >> U0Gx[];
+		file >> Reans;
+		file >> Maans;
+		mpicout << "$$ Re of guess field : " << Reans << endl; 
+		mpicout << "$$ Ma of guess field : " << Maans << endl; 
+	};
+}
+broadcast(processor(0,comm),U0Gx[]); /* broadcast the full initial meanflow */
+defU3d(Ub) = [U0Gx,U0Gy,0.0,U0Gp,U0GT,U0Grho]; /* Restriction to the mpirank^{th} domain */
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFWriteModeParallel)
+macro SFWriteModeParallel(filename,u,typeFlow,ev)
+	{
+		ofstream file(filename);
+	   	{
+			file << "### Data generated by Freefem++ ; " << endl;
+		    file << typeFlow << " for a axisymmetric-compressible problem " << endl;
+		    file << "datatype " << typeFlow << " datastoragemode CxP2P2P2P1P1P1.2 datadescriptors ux,uy,uz,p,T,rho,sigma,omega" << endl;
+			file << "real* Re real* Ma complex* lambda " << endl << endl ; 
+			file << Re << endl;	
+		    file << Ma << endl;
+			file << real(ev) << " " << imag(ev) << endl;
+		}
+	}; 
+// EOM
+ENDIFMACRO
+
+IFMACRO(!SFPostProcess)
+macro SFPostProcess(u,filename,ev)
+	SFReduceFespace(u,uModeG,complex); /* Restrict & Reduce on proc == 0 */
+	if(mpirank==0)
+	{
+		if (iadjoint == "A")
+		{
+			uModeG#x[] = conj(uModeG#x[]);
+		}
+
+		string fileNameS=ffdatadir+"Spectrum.txt";
+		ofstream fileSpectrum(fileNameS); 
+		fileSpectrum << real(ev) << " " << imag(ev) << endl;
+
+		ofstream file(ffdatadir+filename+".txt");
+		file.precision(16);
+   		file.scientific;
+		file << uModeGx[]; 
+		file << endl << real(ev) << endl << imag(ev)  << endl;
+		SFWriteModeParallel(ffdatadir+filename+".ff2m",uModeG,modeEig,ev);
+	};
+// EOM	
+ENDIFMACRO
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		5 : Reading files and parameters
+//
+
+
+SFParameters; // Read basic parameters
+SFParametersOutput;
+SFReadBaseFlow; // Read base flow
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		6a : Construction of variational operators
+//
+
+varf vLNS(defU3d(du),defU3d(us))=-intN(th)( OperatorLNS(Ub,du,us)  ) + BoundaryconditionsStability3D(du,us);
+varf vB(defU3d(du),defU3d(us))=intN(th) (JJJ*InnerProduct(Ub,du,us));
+varf vSponge(defU3d(du),defU3d(us))=-intN(th) (JJJ*AMPFORCE*InnerProduct(Ub,du,us));
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		6b : Construction of matrices
+//
+
+
+matrix<complex> mLNS,mB;
+
+/* Assemble freefem discrete bilinear operators (matrices) */
+
+mLNS = vLNS(XXXxxxH,XXXxxxH);
+mB   = vB(XXXxxxH,XXXxxxH);
+
+{
+	matrix<complex>  mtmp = -shift*mB;
+	mLNS = mLNS + mtmp;
+	if(SpongeActive)
+	{
+		mpicout << "Sponge region is active" << endl;
+		mtmp = vSponge(XXXxxxH,XXXxxxH);
+		mLNS = mLNS + mtmp;
+	}
+}
+
+/* Determine whether the solver is direct or adjoint */
+
+if(iadjoint=="D")
+{ 
+	shiftOP = shift;
+	modeEig = "Eigenmode";
+}
+else if(iadjoint=="A")
+{  
+	mLNS = mLNS';
+	shiftOP = conj(shift);
+	modeEig = "EigenmodeA";
+}
+else
+{
+	SFerror("$$ WARNING : Not implemented. If you look for type 'S'  and 'E' they are no longer supported! please use SF_Sensitivity");
+}
+
+/* Construction of PETSc matrices */
+
+Mat<complex> MLNS(A,mLNS);
+Mat<complex> MB(A,mB);
+mpicout << "Constructed distributed operators " << endl;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 7 : EIGENVALUE PROBLEM
+// 
+
+complex[int] EigenVAL(0); // to store nev eigein values
+XXXxxxH<complex>[int] def(EigenVEC)(1);
+
+set(MLNS, sparams=sparamsDirect);
+
+
+ssparams =            	
+   " -eps_nev " + nev             	/* Number of eigenvalues*/
+  +" -eps_type krylovschur"         /* Type of Eigen Problem Solver */ 
+  + " -eps_target " + 0.0
+  +" -eps_gen_non_hermitian "        /* The problem is not hermitian (A*!=A) by default */
+  +" -st_type sinvert "          	/* Spectral Transformation */
+  +" -st_pc_type lu "            	/* Solver for the linear systems */
+  +" -st_pc_factor_mat_solver_type mumps "
+;
+
+real timeEig = mpiWtime();
+{
+	nComputed = EPSSolve
+	(
+		MLNS,             		/* matrix OP = A - shift B	*/
+		MB,              		/* B matrix					*/
+		vectors   = EigenVEC, 	/* Array to store the FEM-EigenFunctions	*/
+		values  = EigenVAL, 	/* Array to store the EigenValues			*/
+		sparams = ssparams  	/* Parameters for the distributed EigenValue solver */
+	);
+}
+
+timeEig = mpiWtime()-timeEig; 
+mpicout <<"Eigenvalues found : "<< nComputed <<" in "<< timeEig <<" s"<< endl;
+mpicout <<"------------------------------------------"<< endl;
+
+string fileNameS=ffdatadir+"Spectrum.txt";
+ofstream fileSpectrum(fileNameS); 
+fileSpectrum.precision(16);
+
+for (int i=0; i<min(nComputed,nev); i++)
+{
+	EigenVAL[i] = EigenVAL[i] + shiftOP; /* adding the value of the shift */
+
+	if (iadjoint == "A")
+	{
+			EigenVAL[i] = conj(EigenVAL[i]);
+	}
+	mpicout <<"Eigenvalues found : "<< EigenVAL[i] << endl;
+	fileSpectrum << real(EigenVAL[i] ) << " " << imag(EigenVAL[i] ) << endl;
+
+}
+
+
+for (int i=0; i<min(nComputed,nev); i++)
+{
+
+	real timePostI = mpiWtime();
+	uModex[] = EigenVEC[i][];
+	NormalizeMode(uMode,Ub);
+
+	namefile="Eigenmode"+(i+1);
+	SFPostProcess(uMode,namefile,EigenVAL[i]);
+
+	mpicout << " Time in iter " << i << " time: " << mpiWtime() - timePostI << endl;
+};
+
+mpicout << "$$ --- Stability solver has finished --- $$" << endl;
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+

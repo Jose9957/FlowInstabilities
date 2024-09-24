@@ -1,0 +1,361 @@
+//mpiComm comm(mpiCommWorld,0,0);// trick : make a no split mpiWorld
+
+load "SuperLu.so"
+load "symmetrizeCSR.so"
+include "StabFem.idp";
+load "Element_P3"
+load "Element_P4"
+/*=============================================
+=            Physical constants              =
+=============================================*/
+
+real Re,Reans,nu;
+real dt,tps;
+real gamma=1.4;
+real Pr=0.71;
+real p0 = 1.0; // Thermodynamic pressure p0 = rho0*T0
+
+/*=============================================
+=            Solver parameters               =
+=============================================*/
+
+real tolCG=-1.e-06;
+int rep,itmax,iout,iviewcfl=1.0,iplot,iwrite;
+real cpu1,cpu2,cpu3;
+
+/*=============================================
+=            INPUT/OUTPUT                    =
+=============================================*/
+
+cout << "###" << endl <<  "### TIME STEPPER for the flow around a cylinder" << endl << "###" << endl << endl;
+cout << "Enter Re : "<< endl;
+cin >> Re;			
+cout << "Enter initial instant : (0 means start from base flow + eigenmode) "<< endl;
+cin >> rep;	
+cout << "Enter itmax"<< endl;
+cin >> itmax;	
+cout << "Enter dt"<< endl;
+cin >> dt;	
+cout << " Enter iout " << endl;
+cin >> iout;
+cout << " Enter iplot " << endl;
+cin >> iplot;
+int imean;
+cout << " Mode de calcul ? [0 -> pas de champ moyen] [1 -> calcul du champ moyen sur 1 periode] [2 -> calcul de l'ecart au champ moyen]" << endl;
+cin >> imean; 
+nu=1./Re;	
+
+exec("mkdir "+ffdatadir);
+
+/*=============================================
+=            MESH AND FEM SPACES             =
+=============================================*/
+
+mesh th=readmesh(ffdatadir+"mesh.msh");
+fespace XH2(th,P3);
+fespace XH(th,P2);
+fespace XXxH(th,[P3,P3,P2]);
+fespace X2X2x1H(th,[P2,P2,P1]);
+
+{
+	XH2 cfl;
+	cfl=dt/hTriangle; // Initial CFL
+	cout << "--------------------------------" << endl;
+	cout << "--- Dimensionless parameters  ---" << endl;
+	cout << "--------------------------------" << endl;
+	cout << "------  Re            = " << Re << " ---" << endl;
+	cout << "------  dt            = " << dt << " ---" << endl;
+	cout << "------  CFL            = " << cfl[].max << " ---" << endl;
+	cout << "--------------------------------" << endl;
+	cout << "--------------------------------" << endl;
+}
+
+//////////////////////////////////
+/////  Fluid field variables //////
+//////////////////////////////////
+
+XH2 u1,u2,up1,up2,vort,u1c,u2c;
+XH p,pp,q,ps,T,rho;
+X2X2x1H [u1b,u2b,pb];
+
+real[int] rhsp(XH.ndof),dp(XH.ndof),sp(XH.ndof);
+real[int] rhsT(XH.ndof),dT(XH.ndof),sT(XH.ndof),tempT(XH.ndof);	
+real[int] Tp(XH.ndof),Tpp(XH.ndof),Thalf(XH.ndof);
+real[int] rhop(XH.ndof),rhopp(XH.ndof),rhohalf(XH.ndof);
+real[int] lnrhop(XH.ndof),lnrhohalf(XH.ndof),lnrho(XH.ndof);	
+real[int] tempu(XH2.ndof);
+real[int] rhsu(XH2.ndof),rhsv(XH2.ndof);
+real[int] rhsup(XH2.ndof),rhsvp(XH2.ndof);
+real[int] rhsupp(XH2.ndof),rhsvpp(XH2.ndof);
+real[int] u1p(XH2.ndof),u1pp(XH2.ndof);
+real[int] u2p(XH2.ndof),u2pp(XH2.ndof);
+real[int] ppp1(XH.ndof),pp1(XH.ndof);
+real alpha0,alpha1,alpha2,alpha3;
+real beta1,beta2,beta3;
+
+///////////////////////////////////////////////
+/////           Formulation              //////
+///////////////////////////////////////////////
+
+varf vbx(u,q) = int2d(th)( dx(u)*q ); 
+varf vby(u,q) = int2d(th)( dy(u)*q );
+varf vD1x(u,q) = int2d(th)( dx(u)*q ); 
+varf vD1y(u,q) = int2d(th)( dy(u)*q );
+varf vDD1x(u,q) = int2d(th)( dx(u)*dx(q) ); 
+varf vDD1y(u,q) = int2d(th)( dy(u)*dy(q) );
+varf vau(u,v)= int2d(th)(  alpha0*u*v/dt + nu*(dx(u)*dx(v) + dy(u)*dy(v)) ) + on(4,u=1) + on(2,u=1) + on(1,u=1);
+varf vconvu1(u,v)= int2d(th)(  ( u1c*dx(u1)+u2c*dy(u1) )*v );
+varf vconvu2(u,v)= int2d(th)(  ( u1c*dx(u2)+u2c*dy(u2) )*v );
+varf vap(p,q)= int2d(th)(  dx(p)*dx(q) + dy(p)*dy(q) )+ on(3,p=0); // if P2/P1 we can set qft=qf1pTlump (lump matrix)
+varf vaT(urho,vrho)= int2d(th)(  alpha0*urho*vrho/dt - (beta1*u1+beta2*up1)*dx(urho)*vrho - (beta1*u2+beta2*up2)*dy(urho)*vrho
+								  );
+varf vmassp(p,q) = int2d(th)( p*q )+ on(3,p=0); // if P2/P1 we can set qft=qf1pTlump (lump matrix)
+varf vmassu(u1,u2) = int2d(th)( u1*u2 );
+varf vmassT(uT,vT) = int2d(th)( uT*vT );
+varf vmassrhoT(uT,vT) = int2d(th)( rho*uT*vT );
+
+varf von1(u1,u2)= on(1,u1=1);
+varf von2(u1,u2)= on(2,u1=1);
+varf von4(u1,u2)= on(4,u1=1);
+
+////////////////////////////////////
+/////  Matrix construction    //////
+////////////////////////////////////
+
+matrix Au,Ap,AT,Bx,By,D1x,D1y,DD1x,DD1y,Dx,Dy,Mu,Mp,MT,MrhoT;
+
+Ap= vap(XH,XH,solver=GMRES); 
+Bx= vbx(XH2,XH);
+By= vby(XH2,XH);
+Dx= vbx(XH2,XH2);
+Dy= vby(XH2,XH2);
+D1x= vD1x(XH,XH);
+D1y= vD1y(XH,XH);
+DD1x= vDD1x(XH,XH);
+DD1y= vDD1y(XH,XH);
+Mu=vmassu(XH2,XH2,solver=GMRES);
+Mp=vmassp(XH,XH,solver=CG);
+MT=vmassT(XH,XH,solver=GMRES);
+MrhoT=vmassrhoT(XH,XH,solver=GMRES);
+
+XH2 on1,on2,on4;
+on1[]=von1(0,XH2,tgv=1);
+on2[]=von2(0,XH2,tgv=1);
+on4[]=von4(0,XH2,tgv=1);
+
+cout << "Factorisation" << endl;
+set(Ap,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+set(Mu,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+set(MT,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+
+real[int] TTT(AT.n),Ttemp(AT.n),Tout(AT.n);
+
+func real[int] divuT(real[int] & TT)
+{ 
+	TT = AT^-1*rhsT;
+
+	return TT ;
+};
+
+
+////////////////////////////////////
+/////  Function definition    //////
+////////////////////////////////////
+
+real[int] ppp(Ap.n),ptemp(Ap.n),pout(Ap.n);
+
+func real[int] divup(real[int] & pp)
+{ 
+	tempu = rhsu; tempu  += Bx'*pp;
+	tempu = on1[] ? 1.0 : tempu;
+	tempu = on2[] ? 0.0 : tempu;
+	tempu = on4[] ? 1.0 : tempu;
+	u1[] = Au^-1*tempu;
+
+	tempu  = rhsv; tempu  += By'*pp; 
+	tempu = on1[] ? 0.0 : tempu;
+	tempu = on2[] ? 0.0 : tempu;
+	tempu = on4[] ? 0.0 : tempu;
+	u2[] = Au^-1*tempu;
+
+	ppp =  Bx*u1[];
+	ppp += By*u2[];
+
+	return ppp ;
+};
+
+func real[int] precCahouet(real[int] & pin)
+{ 
+	pout=Mp^-1*pin;
+	pout*=nu;	
+	ptemp=Ap^-1*pin;
+	pout+=alpha0/dt*ptemp;
+
+	return pout;
+};
+
+DNSTimeStatisticsINIT(ffdatadir+"dns_Stats_Re"+Re)
+
+//////////////////////////////////
+/////  Initial condition     /////
+//////////////////////////////////
+
+
+if(rep==0) // starting from a given initial condition
+{  
+	
+	cout << "Starting from a given initial condition" << endl;
+    {
+		ifstream file(ffdatadir+"dnsfield_start.txt");
+		file >> u1b[];
+		file >> Reans;
+    };
+    u1 = u1b; u2 = u2b; p = pb; T=1.0+0.001*pb; Tp = 1.0+0.001*pb; rho[] = 1.0+0.001*pb; rhop = rho[];
+    p0 = 1.0; // Termodynamic pressure
+    tps = 0;
+    exec("rm dns_liftanddrag_Re"+Re+".txt");
+}
+else // Starting from previous solution. Restart
+{
+	ifstream file(ffdatadir+"DNSFIELDS/dnsfield_"+rep+".txt");
+	file >> u1b[];
+	file >> tps;
+	u1 = u1b; u2 = u2b; p = pb;
+	cout << "Starting from previous field for it= " << rep << " ; tps = " << tps << endl; 
+};
+
+/////////////////////////////////////////////
+///////////   Time loop         /////////////
+/////////////////////////////////////////////
+
+cout << "Time Loop" << endl;
+
+for (int it=rep+1;it<=rep+itmax;it++)
+{
+	cpu1=time();
+
+	if(it==rep+1)
+	{
+		alpha0=1.; alpha1=1.; alpha2=0.; beta1=-1.; beta2=0.;
+		Au= vau(XH2,XH2,solver=GMRES,tgv=-1);
+		set(Au,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+		// For temperature 
+		AT= vaT(XH,XH,solver=GMRES,tgv=-1);
+		set(AT,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+	};
+
+	if(it==rep+3)
+	{
+		alpha0=3./2.; alpha1=2.; alpha2=-1./2.; beta1=-2.; beta2=1.;
+		Au= vau(XH2,XH2,solver=GMRES,tgv=-1);
+		set(Au,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+		// For temperature 
+		AT= vaT(XH,XH,solver=GMRES,tgv=-1);
+		set(AT,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+	};
+
+	//////////////////////////
+	//Construction du rhs T //
+	//////////////////////////
+	up1[] = u1p; up2[] = u2p;
+	tempT= alpha2/dt*rhop; rhop=rho[]; tempT+=alpha1/dt*rhop; rhsT=MT*tempT;
+	tempT = Bx*u1[]; tempT += By*u2[]; rhsT = rho[].*tempT;
+	//tempT= rho[]; tempT = tempT/(Pr/nu); dT = DD1x*T[]; sT = DD1y*T[]; dT = dT + sT;
+	//tempT = tempT.*dT;
+	//rhsT += tempT;
+	/*
+	dT = beta1*u1[]; dT += beta2*u1p; tempT = D1x*(Tp); tempT = dT.*tempT; rhsT += tempT;
+	dT = beta1*u2[]; dT += beta2*u2p; tempT = D1y*(Tp); tempT = dT.*tempT; rhsT += tempT;
+	// HEAT EQUATION
+	dT = -beta1*u1[]; dT -= beta2*u1p; tempT = D1x*(p[]); tempT = dT.*tempT; rhsT += (gamma-1)*tempT;
+	dT = -beta1*u2[]; dT -= beta2*u2p; tempT = D1y*(p[]); tempT = dT.*tempT; rhsT += (gamma-1)*tempT;
+	tempT=-alpha2/dt*ppp1; ppp1=pp1; tempT-=alpha1/dt*pp1; pp1=p[]; tempT+=alpha0/dt*pp1; tempT = (gamma-1)*tempT; rhsT+=MT*tempT;
+	rhsT = on1[] ? 1.0 : rhsT;
+	rhsT = on4[] ? 1.0 : rhsT;	
+	*/
+	// ENERGY EQUATION
+	/*
+	dT = beta1*u1[]; dT += beta2*u1p; dT = dT*D1x(lnrhohalf);
+	sT = beta1*u2[]; sT += beta2*u2p; sT = sT*D1y(lnrhohalf);
+	tempT = -lnrho/dt; tempT += lnrhop/dt;
+	tempT += dT;
+	tempT += sT;
+	tempT = p[].*tempT; rhsT += (gamma-1)*tempT;
+	*/
+
+	//LinearCG(divuT,T[],eps=tolCG,nbiter=20,verbosity=0);
+	rho[] = AT^-1*rhsT;
+	T[] = p0/rho[]; // Define temperature
+	/*
+	rho[] = p0/T[]; // Define density
+	Thalf = Tp + T[];
+	Thalf = 0.5*Thalf; // State n+1/2 for temperature
+	rhohalf = rhop + rho[];
+	rhohalf = 0.5*rhohalf;
+	lnrho = log(rho[]);
+	lnrhohalf = log(rhohalf);
+	lnrhop = log(rhop);
+	*/
+	//////////////////////////
+	// Construction du rhs  //
+	//////////////////////////
+
+	tempu=alpha2/dt*u1p; u1p=u1[]; tempu+=alpha1/dt*u1p; rhsu=Mu*tempu;			
+	tempu=alpha2/dt*u2p; u2p=u2[]; tempu+=alpha1/dt*u2p; rhsv=Mu*tempu;			
+	
+	rhsu+=beta2*rhsup; rhsv+=beta2*rhsvp;
+
+	u1c[]=u1[]; 
+	u2c[]=u2[]; 
+
+	tempu=0.0; rhsup=Mu*tempu; tempu=Dx*u1[]; rhsup+=u1c[].*tempu; tempu=Dy*u1[]; rhsup+=u2c[].*tempu; 
+	tempu=0.0; rhsvp=Mu*tempu; tempu=Dx*u2[]; rhsvp+=u1c[].*tempu; tempu=Dy*u2[]; rhsvp+=u2c[].*tempu;
+
+	rhsu+=beta1*rhsup; rhsv+=beta1*rhsvp;
+
+	tps+=dt;
+
+
+	// Resolution probleme de Stokes
+	q[]=0;
+	cpu2=time();
+	LinearCG(divup,precon=precCahouet,p[],q[],eps=tolCG,nbiter=20,verbosity=0);
+
+	cpu3=time();
+
+	if(it%iout==0) 
+	{
+
+		if(iviewcfl==1)
+		{
+			XH2 cfl;
+			cfl=sqrt(u1c*u1c+u2c*u2c)*dt/hTriangle; 
+			cout << "CFL : " << cfl[].max << endl;
+		}
+		else
+		{
+			tempu=Dy*u1[]; tempu*=-1; tempu+=Dx*u2[];
+			vort[]=Mu^-1*tempu;
+		};
+	};
+
+	if(it%iout==0)
+	{
+				
+		X2X2x1H [uDNSx,uDNSy,uDNSp];
+		[uDNSx,uDNSy,uDNSp] = [u1,u2,p];
+        ofstream g(ffdatadir+"DNSFIELDS/dnsfield_"+(it)+".txt");
+		g << uDNSx[] << endl << endl;
+		g << Re << endl << endl;
+		g << tps << endl << endl;
+		DNSTimeStatistics(ffdatadir+"dns_Stats_Re"+Re)
+		SFWriteDNSField(ffdatadir+"DNSFIELDS/dnsfield_"+(it)+".ff2m",uDNS,"DNSField",it)
+		
+    };
+};
+
+//mpiBarrier(comm);
+/////////////////////////////////////////////
+/////////  Fin Boucle en temps   ////////////
+/////////////////////////////////////////////
+

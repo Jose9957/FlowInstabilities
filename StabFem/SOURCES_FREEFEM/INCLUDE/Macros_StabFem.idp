@@ -1,0 +1,3 @@
+include "StabFem.idp"	// this file is normally in the SOURCES_FREEFEM/INCLUDE directory
+SFwarning("Macros_StabFem.idp should be replaced by StabFem.idp everywhere !"); 
+

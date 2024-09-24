@@ -1,0 +1,2 @@
+// This automatically generated file is to be included in the preamble of FF codes 
+macro ffdatadir() "./WORK/" //EOM

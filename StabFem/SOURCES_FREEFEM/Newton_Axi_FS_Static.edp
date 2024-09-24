@@ -1,0 +1,393 @@
+
+// Calcul de la forme d'equilibre d'une surface libre statique (ou avec vitesse potentielle) axisymétrique.
+
+
+
+// La forme initiale est lue dans le fichier "MeshBridge_guess.msh". 
+
+
+// History :
+// This file is adapted from "Newton_FormePont_V.edp" from "LiquidBridges++_V1.3".
+// Has been updated by N. Achour & D. Fabre in July 2018
+//
+// REwritten by DF in sept 2020 using Lineic meshes etc...
+
+
+
+
+
+verbosity = 0;
+
+// Parametres :
+real Rbase = 1; // On prend le rayon du tube capillaire comme echelle de longueur (eviter de changer !)
+
+
+////////////////////////////////////////////////////////////////
+//
+// MAILLAGE ET GEOMETRIE INITIAUX
+//
+////////////////////////////////////////////////////////////////
+
+//include "SF_Geom.edp";
+include "StabFem.idp"
+include "Macros_Lineic.idp"
+
+mesh Th=readmesh(ffdatadir+"mesh_guess.msh");
+
+
+int[int] l7=[7]; 
+meshL Thlin = extract(Th,refedge=l7); //lineic mesh corresponding to boundary 7
+
+fespace Vhlin(Thlin,P1); 
+Vhlin xsurf,ysurf,alphasurf,S0,N0x,N0y,K0a,K0b;
+
+
+
+
+/////////////////////////////////////
+//
+// INPUT PARAMETER
+//
+///////////////////////////////////////
+
+real PP0 = 1; // guess
+real PP1;
+real dpdz;
+real gamma ; 
+string typestart; // possibilites : "pined", "axis", "plane", "freeH", "freeV"
+string typeend;    // possibilites : "pined", "axis", "plane", "angle"
+
+
+cout << "$$ Entering FreeFem++ Program Newton_Axi_FreeSurface_Static.edp : " << endl;
+cout << "$$ COMPUTATION OF A MENISCUS (static equilibrium shape of a free surface) and corresponding mesh" << endl;
+cout << "$$ Input parameters : " << endl;
+
+string typecont;
+cout << "$$ Type of continuation : V (impose volume), P (impose pressure) or angle (impose angle) or S (arclength continuation) 	>> " ;
+//cin >>  typecont;
+typecont = getARGV("-typecont","P");
+cout << typecont << endl;
+real VolObj;
+real thetaS, alphaS;
+
+if(typecont=="V")
+{
+cout << "$$ Value of prescribed volume  V0    >> " ;
+//cin >> VolObj;
+VolObj = getARGV("-V",1.);
+cout << VolObj << endl;
+VolObj = VolObj/(2*pi);
+// Warning the "volume" used in the code is actually volume/(2 pi) ; to be rationalised someday
+}
+
+else if(typecont=="P")
+{
+cout << "$$ Value of prescribed reference pressure P0 (at z=0)    >> " ;
+//cin >> PP0;
+PP0 = getARGV("-P",0.);
+cout << PP0 << endl;
+}
+
+else if(typecont=="angle")
+{
+cout << "$$ Value of prescribed static angle (degrees)    >> " ;
+thetaS = getARGV("-thetaS",0.);
+cout << thetaS ;
+thetaS = pi/180*thetaS;
+cout << "( = " << thetaS << " radians )" << endl;
+}
+
+else if(typecont=="S")
+{
+cout << "$$ WARNING : type continuation 'S' not yet implemented ! " << endl;
+exit(10);
+}
+
+else
+{
+cout << "$$ WARNING : type continuation n" << typecont << " not recognized !!! " << endl;
+exit(10);
+};
+
+
+cout << "$$ Value of surface tension  >>" ;
+//cin >> gamma ;
+gamma = getARGV("-gamma",1.);
+cout << gamma << endl;
+
+cout << "$$ Value of gravity parameter (rho g) >>  " ;
+//cin >> dpdz;
+dpdz = getARGV("-dpdz",1.);
+cout << dpdz << endl;
+
+real GAMMABAR;
+cout << "$$ Value of ROTATION parameter bar{Gamma}  = Gamma/(2*pi) >> " ;
+//cin >> GAMMABAR;
+cout  << GAMMABAR << endl;
+if(GAMMABAR!=0) {cout << " ERROR : GAMMA (rotation) NOT YET IMPLEMENTED !!!'" << endl; exit(10);};
+
+
+cout << "%% typestart (pined, axis, plane, freeH, freeV) : ";
+typestart = getARGV("-typestart","pined");
+cout << typestart << endl;
+
+cout << "%% typeend (pined, axis, plane) : ";
+typeend = getARGV("-typeend","axis");
+cout << typeend << endl;
+
+if(typecont=="angle")
+{
+if(typestart=="freeV"){ alphaS = 3*pi/2-thetaS;}
+if(typestart=="freeH"){ alphaS = pi/-thetaS;}
+if(typestart=="pined"){ cout << "error : in 'angle' mode typestart must be set to either freeV or freeH (even if it's actually pined)" << endl;}
+};
+
+
+/////////////////////////////////////
+//
+// Macros for mesh deformation
+//
+///////////////////////////////////////
+
+macro Ds(a) (Tl.x*dx(a)+Tl.y*dy(a)) //EOM
+
+macro CalcEtaLin(etaNewton,PP0,dpdz)
+solve CalcEtaP(etaNewton,test) 
+	= int1d(Thlin)((gamma*(K0a+K0b)-(PP0-dpdz*y))*test*x) /* 1ere integrale : RHS */ 
+        + int1d(Thlin)((gamma*(Ds(etaNewton))*(Ds(test))  -gamma*(K0a^2+K0b^2)*etaNewton*test +dpdz*etaNewton*test*N0y)*x) /* 2e integrale : matrice A */
+       	+ int0d(Thlin)(etaNewton*test*x*1e30*(typestart=="pined"))
+	;		    
+//EOM
+		    
+		    
+// Calcul de la deformation de surface libre necessaire pour corriger la courbure du maillage (a volume impose)	  
+macro CalcEtaLinV(etaNewton,PP1,V,dpdz)
+{
+varf MatEta(etaNewton,test) = 
+    int1d(Thlin)((gamma*(Ds(etaNewton))*(Ds(test))  -gamma*(K0a^2+K0b^2)*etaNewton*test+dpdz*etaNewton*test*N0y)*abs(x))
+  + int0d(Thlin)(etaNewton*test*x*1e30*(typestart=="pined"))
+  /*+ int1d(thsurface,labelaxis)(etaNewton*test*1e30)*/
+  ;		 
+varf MatEtaRHS(etaNewton,test) = 
+	int1d(Thlin)(-(gamma*(K0a+K0b)-(PP0-dpdz*y))*test*abs(x));		    
+varf VecEta(etaNewton,test) = int1d(Thlin)(-test*abs(x));
+varf VecVol(etaNewton,test) = int1d(Thlin)(test*abs(x));
+matrix A11 = MatEta(Vhlin,Vhlin); 
+real[int] A12 = VecEta(0,Vhlin); 
+real[int] A21p = VecVol(0,Vhlin); 
+real A22 = 0;
+matrix A = [[A11, A12],[A21p',A22]];
+set(A,solver=sparsesolver);
+real[int] RHS1 = MatEtaRHS(0,Vhlin);
+real RHS2 = V-int2d(Th)(x); 
+real[int] RHS = [RHS1,RHS2];
+real[int] xx = A^-1 * RHS;
+etaNewton = etaNewton; /* this one is important in case the mesh has moved...*/
+[etaNewton[],PP1] = xx;
+}
+//EOM
+
+// Calcul de la deformation de surface libre necessaire pour corriger la courbure du maillage (a volume impose)	  
+macro CalcEtaLinangle(etaNewton,PP1,alphaS,dpdz)
+{
+varf MatEta(etaNewton,test) = 
+    int1d(Thlin)((gamma*(Ds(etaNewton))*(Ds(test))  -gamma*(K0a^2+K0b^2)*etaNewton*test+dpdz*etaNewton*test*N0y)*abs(x))
+    + int0d(Thlin)(etaNewton*test*1e30*x*(typestart=="pined"))
+  /*+ int1d(thsurface,labelaxis)(etaNewton*test*1e30)*/
+  ;	 
+varf MatEtaRHS(etaNewton,test) = 
+	int1d(Thlin)(-(gamma*(K0a+K0b)-(PP0-dpdz*y))*test*abs(x));		    
+varf VecEta(etaNewton,test) = int1d(Thlin)(-test*abs(x));
+matrix A11 = MatEta(Vhlin,Vhlin); 
+real[int] A12 = VecEta(0,Vhlin); 
+real[int] A21p(A11.n); 
+A21p = 0; A21p(0) =  1;
+matrix A = [[A11, A12],[A21p',1e-20]];
+set(A,solver=sparsesolver);
+real[int] RHS1 = MatEtaRHS(0,Vhlin);
+RHS1(0) += gamma*(alphaS-atan2(N0x[](0),-N0y[](0))*xsurf[](0)); /* TO BE CHECKED */
+real RHS2 = 0; 
+real[int] RHS = [RHS1,RHS2];
+real[int] xx = A^-1 * RHS;
+etaNewton = etaNewton; /* this one is important in case the mesh has moved...*/
+[etaNewton[],PP1] = xx;
+}
+//EOM
+
+macro CalcDefLin(Udefr,Udefz,etaNewton)
+{
+fespace Vh11m(Th,[P1,P1]);
+/*Vh11 [Udefz,Udefr]*/
+Vh11m [vdefr,vdefz];
+/* problem pour cas pined */
+solve CalcDefp([Udefr,Udefz],[vdefr,vdefz])=
+    int2d(Th)( ((dx(Udefz)*dx(vdefz)+dy(Udefz)*dy(vdefz)) + (dx(Udefr)*dx(vdefr)+dy(Udefr)*dy(vdefr))) )
+/*+on(labelsurf,Udefr=etaNewton*N0r,Udefz=etaNewton*N0z)*/
++int1d(Th,7)((Udefr*vdefr+Udefz*vdefz)*1e20)
+-int1d(Th,7)((etaNewton*N0x*vdefr+etaNewton*N0y*vdefz)*1e20)
++int1d(Th,2)((Udefr*vdefr*1e20+Udefz*vdefz*1e20)*x*(typestart=="pined"))
++int1d(Th,6)((Udefr*vdefr)*1e20);
+/*+on(5,6,55,Udefr=0,Udefz=0)
++on(1,11,Udefr=0,Udefz=0); ne pas le faire sur l'axe */
+}
+//EOM
+
+/////////////////////////////////////
+//
+// Calcul de la geometrie initiale
+//
+///////////////////////////////////////
+
+
+CalcGeomLin(Thlin,xsurf,ysurf,S0,alphasurf,N0x,N0y,K0a,K0b,Th,7)
+//CheckGeom;
+int Nsurface = xsurf[].n;
+
+real Zmin = ysurf[](0);
+real Zmax = ysurf[](Nsurface-1);
+real L = Zmax-Zmin;
+
+////////////////////////////////////////////////////////////////
+//
+// ALGORIthME DE NEWTON
+//
+////////////////////////////////////////////////////////////////
+
+
+
+
+real Res=1;
+int Itmax = 30;
+
+
+Vhlin etaNewton,test;
+real Resmax = getARGV("-Resmax",3e-8);
+cout << "Max tolerance for Newton : " << Resmax << endl;
+
+for(int i = 0; (i<Itmax)&(Res>Resmax);i++)
+{
+cout << " iteration " << i << endl;
+// Calcul de la deformation de surface 
+Vhlin etaNewton ;
+if(typecont=="V")
+{
+CalcEtaLinV(etaNewton,PP1,VolObj,dpdz);
+cout << " Modif pression : PP1 = " << PP1 << endl;
+PP0 = PP0+PP1;
+cout << " Nouvelle pression : PP0 : " << PP0 << endl;
+}
+else if(typecont=="P")
+{
+CalcEtaLin(etaNewton,PP0,dpdz);
+cout << " It P completed" << endl;
+}
+else if(typecont=="angle")
+{
+CalcEtaLinangle(etaNewton,PP1,alphaS,dpdz);
+cout << " It alpha completed" << endl;
+}
+else
+{
+cout << "ERROR : typecont should only be V or P (S not implemented yet)" << endl;
+exit(10);
+};
+
+//cout << "ETA : " << endl << etaNewton[] << endl;
+
+// Calcul d'un champ de deplacement du maillage 
+
+fespace Vh11(Th,[P1,P1]);
+Vh11 [ur,uz];
+CalcDefLin(ur,uz,etaNewton);
+cout << " Deflin completed" << endl;
+cout << "max Uz : " << uz[].max << endl ;
+cout << "max Ur : " << ur[].max << endl ;
+
+IFMACRO(FREEFEMPLOTS,YES)
+//plot([ur,uz],fill=1,value=1,cmm="champ de deformation calcule iteration "+i,wait=1);
+ENDIFMACRO
+
+// Deplacement du maillage
+
+
+real minarea=checkmovemesh(Th,[x+ur,y+uz]);
+if (minarea <0 )
+	{
+		cout << " WARNING : movemesh not valid. trying to underrelax by a factor 1/2" << endl;
+		[ur,uz] = [ur/2,uz/2]; 
+	}
+
+Th = movemesh(Th,[x+ur,y+uz]);
+Thlin = extract(Th,refedge=l7);
+
+
+// Recalcul des normales et courbures
+CalcGeomLin(Thlin,xsurf,ysurf,S0,alphasurf,N0x,N0y,K0a,K0b,Th,7)
+
+
+real NewVolume = int2d(Th)(x);
+cout << "NewVolume = " << NewVolume << endl; 
+
+Res = int1d(Thlin)(abs(x)*(gamma*(K0a+K0b)-(PP0-dpdz*y))^2);
+cout << " iteration " << i << " : Res = " << Res << " ; Volume = " << NewVolume << " ; PP0 = " << PP0 << " ; angle = " << 2*pi+atan2(N0x[](0),-N0y[](0)) <<  endl; 
+
+cout << " Max(eta) :" << etaNewton[].max << endl;
+
+}
+//  ----------------------------------------------------------------------------------------------------
+// Fin du Newton 
+//  ----------------------------------------------------------------------------------------------------
+
+
+cout << endl << " ------- NEWTON TERMINE -------" << endl << endl;
+
+//CheckGeom; // macro to display the geometry characteristics
+
+// Ecriture du maillage dans un fichier
+
+if (Res < Resmax)
+{ cout << "solution convergee : on copie le maillage dans mesh.msh" << endl;
+ savemesh(Th,ffdatadir+"mesh.msh");
+
+IFMACRO(SFWriteMesh) 
+ 	SFWriteMesh(ffdatadir+"mesh.ff2m",Th,"deformed")
+ENDIFMACRO
+ 
+ 
+ 
+IFMACRO(SFWriteConnectivity)
+	SFWriteConnectivity(ffdatadir+"mesh_connectivity.ff2m",Th);
+ENDIFMACRO
+
+
+//SFWriteMeshSurface(ffdatadir+"mesh_surface.ff2m",Th);
+
+//// EXPORTATION DU "champ de base" AUX FORMAT FF2M
+
+{				
+		ofstream file(ffdatadir+"FreeSurface.txt");
+	    file << gamma << endl << dpdz << endl << GAMMABAR << endl;
+	    SFWriteSurface(ffdatadir+"FreeSurface.ff2m",Th);
+	    SFWriteMeshLin(ffdatadir+"mesh_line.ff2m",Thlin,xsurf,ysurf,S0,N0x,N0y,K0a,K0b)	
+
+}
+
+ real NewVolume = int2d(Th)(x);
+ cout << "$$ Statistique sur geometrie" << endl;
+ cout << "$$ P0 = " << PP0 << endl;
+ cout << "$$ Volume = " << 2*pi*NewVolume << "       ( Volume / 2pi = " << NewVolume << " ) " << endl;  
+// cout << "$$ Angle at starting point = " << atan2(N0x[](0),-N0y[](0))*180/pi << "      ( = " << atan2(N0x[](0),-N0y[](0)) << " radians )" << endl;
+   cout << "$$ Angle at starting point = " << alphasurf[](0)*180/pi << "      ( = " << alphasurf[](0) << " radians )" << endl;  
+}
+else
+{
+		cout << "$$ NEWTON ITERATION FAILED" << endl;
+		cout << "$$ Leaving FreeFem++ with error code 201" << endl;
+		exit(201);
+};
+
+
+
+cout << endl << "The end..." << endl << endl;
+
+

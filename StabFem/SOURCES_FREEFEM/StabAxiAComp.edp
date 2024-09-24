@@ -1,0 +1,455 @@
+//
+//  PROGRAM Stab_Axi.edp
+//	
+//	Performs the linear stability analysis of an Axisymmetric flow
+//   
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re , shift(Re,im) , Symmetry, Type, nev 
+//
+//   this solver will use either Arnoldi (if nev>1) or simple Shift-invert (if nev=1)
+//
+//	INPUT FILES :
+//		BaseFlow.txt	-> base flow 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//	single-mode calculation :
+//		Eigenmode.txt   (txt format for FreeFem)
+//      Eigenmode.ff2m  (ff2m format for stabfem)
+// 		EigenmodeA.txt  ADJOINT  (txt format for FreeFem)
+//      EigenmodeA.ff2m ADJOINT  (ff2m format for stabfem)
+//      Sensitivity.txt 
+//		Sensitivity.ff2m
+//
+// multiple-mode calculation :
+//  	Eigenmode##.txt   (txt format for FreeFem)
+//      Eigenmode##.ff2m  (ff2m format for stabfem)
+//
+// in all modes :
+//		Spectrum.txt -> All computed Eigenvalues
+//
+// 
+// 	ERROR MANAGEMENT : 
+//      if shift-invert iteration diverges, Error code is 202.
+//
+
+include "StabFem.idp";
+
+////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 1 : selection of parameters		
+//
+
+
+	cout << "$$ ENTERING StabAxi.edp " << endl << "$$" << endl; 
+	
+	real Ma, Re; 
+	real Vin,Vcav; // AC volume inlet or cavity
+	real nu;
+	real shiftr,shifti;	
+	complex shift;
+	int m; // Azimuthal harmonic
+	string iadjoint; // type of computation (Direct (D), Adjoint (A))
+	int nev, ncv; // number of eigenvalues and size of Krylov Basis
+    real epsilon	= 1e-20; // stabilisation parameter
+    real TGV = 1e30;			// Tres grande valeur
+
+
+	cout << "$$ Enter Reynolds >> "; cin  >> Re; nu = 1/Re; cout << Re << endl;
+	// If Nu is something else than 1/Re define a macro CUSTOMnu in your StabFem.idp file
+	IFMACRO(CUSTOMnu)
+    	nu = CUSTOMnu;
+    ENDIFMACRO	
+	cout << "$$ Enter SHIFT (re,im) :   " << endl; cin  >> shiftr >> shifti; shift = 1i*shifti+shiftr;
+	cout << "$$ Wavenumber ? " << endl; cin >> m;
+	cout << " Direct (D), Adjoint (A)?" << endl; cin >> iadjoint;	
+    cout << "$$ Enter nev ? (will use simple shift-invert if nev = 1)" << endl; cin >> nev ; ncv = 4*nev;	
+    cout << "$$ Enter Mach of the Augmented compressibility method (inlet or cavity) " << endl; cin  >> Ma;
+    cout << "$$ Enter Volume of the Augmented compressibility method (inlet) " << endl; cin  >> Vin;
+    cout << "$$ Enter Volume of the Augmented compressibility method (inlet) " << endl; cin  >> Vcav;
+
+    // 
+	// OUTPUT
+	//
+	
+	cout << "$$ ### PARAMETERS SELECTED : " << endl;
+	cout << "$$ Re = " << Re << endl;
+	cout << "$$ Ma = " << Ma << endl;
+	cout << "$$ Vin = " << Vin << endl;
+	cout << "$$ shift = " << shift << endl;
+	cout << "$$ wavenumber m = " << m << endl;
+	cout << "$$ nev = " << nev << endl;	
+	if (iadjoint =="D") {cout << "$$ DIRECT PROBLEM" << endl;}
+		else if (iadjoint =="A") {cout << "$$ ADJOINT PROBLEM" << endl;}
+		else {cout << "$$ ERROR WHEN SELECTING PROBLEM TYPE" << endl;};
+	
+	
+	
+////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 2 : read input files	
+//
+
+// 
+// First read mesh
+//
+
+mesh th=readmesh(ffdatadir+"mesh.msh");                    ///// Read mesh
+
+//
+// Declare FEspaces
+//
+
+fespace Xh(th,P2);             ////// f.e. space for vel.
+fespace Mh(th,P1);            ////// f.e. space for pressure
+fespace XXMh(th,[P2,P2,P1]); ////// f.e. space for triplet [u,v,p]
+fespace XXXMh(th,[P2,P2,P2,P1]); ////// f.e. space for triplet [u,v,p]
+XXXMh<complex> [ux,ur,uphi,up];                 ///////  -> unknown for the Navier-Stokes problem
+XXMh<complex> [uAxix,uAxir,uAxip];                 ///////  -> unknown for the Navier-Stokes problem
+XXXMh [vx,vr,vphi,vp];                 ///////  -> test for Navier-Stokes
+XXXMh [Ubx,Ubr,Ubphi,Ubp];          ///////  -> Base Flow
+XXMh [Ubaxix,Ubaxir,Ubaxip];          ///////  -> Base Flow (in case we start with a 2-component one)
+
+//
+//  Load baseflow   
+//
+		int NdimUVP = Ubaxix[].n;
+    	int NdimUVWP = Ubx[].n;
+    	int NdimBaseFlow;
+    	real Reans;
+    	SFcheckfile("BaseFlow.txt",NdimBaseFlow)
+		if(NdimBaseFlow == NdimUVP) 
+		{
+        cout << "$$ Ndim = " << NdimUVP << " : reading UVP baseflow " << endl;
+        ifstream file(ffdatadir+"BaseFlow.txt");
+        file >> Ubaxix[];
+        [Ubx,Ubr,Ubphi,Ubp] = [Ubaxix,Ubaxir,0,Ubaxip];
+		file >> Reans;
+        }
+        else if(NdimBaseFlow == NdimUVWP) 
+        {
+        cout << "$$ Ndim = " << NdimUVWP << " : reading UVWP baseflow " << endl;
+        ifstream file(ffdatadir+"BaseFlow.txt");
+        file >> Ubx[]; 
+		file >> Reans;
+        }
+        else 
+        {
+        SFerror("Wrong dimension For BaseFlow.txt file");
+        exit(7);
+        };
+	if(Reans!=Re) 
+	{
+	SFwarning("Re differs from the one of the read base flow (Reans = " +Reans
+	+" ); is that really what you mean ???");
+	};
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 3 : Customizable macros 	
+//
+
+// A. (to disable coordinate mapping if not relevant)
+IFMACRO(!dX)
+macro dX(a) dx(a) //EOM
+macro dY(a) dy(a) //EOM
+macro JJJ   2*pi*y //EOM
+ENDIFMACRO
+
+IFMACRO(!OUTPUTTYPE)
+macro OUTPUTTYPE 2DAxi //EOM Choose 2DAxi or 3DAxi
+ENDIFMACRO
+// B. Boundary conditions and normalization
+IFMACRO(!BoundaryconditionsStability)
+macro BoundaryconditionsStability(u,v,m)
+	           on(2,u#x=0,u#r=0.0,u#phi=0.0)
+	         + int1d(th,21)( JJJ*(u#x*N.x+u#r*N.y)*(v#x*N.x+v#r*N.y)*TGV ) 
+	         + int1d(th,1)( JJJ*(u#x*N.x+u#r*N.y)*(v#x*N.x+v#r*N.y)*TGV ) 
+	         + on(21,u#x=0.0,u#phi=0.0)	/* cavity up */
+	         + on(5,u#x=0.0)+on(4,u#r=0)
+	         + int1d(th,6)(u#x*v#x*1e30*(abs(m)>0)+(u#r*v#r)*1e30*(abs(m)!=1))   
+             + int1d(th,6)((u#phi*v#phi)*1e30*(abs(m)!=1)) 
+//EOM
+ENDIFMACRO
+
+
+IFMACRO(!NormalizeMode)
+macro NormalizeMode(u)
+{
+real NORM = int2d(th)((abs(u#x)^2+abs(u#r)^2+abs(u#phi)^2)*y);
+u#x[] = u#x[]/(NORM+1e-12);
+}
+//EOM
+ENDIFMACRO
+
+// C. Postprocessing
+IFMACRO(!SFWriteMode)	
+macro SFWriteMode(namefile,u,pin,qin,pcav,qcav,qout,Dqout,pout,ev,shift,m,typeFlow,iter)
+		 {
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1); 
+    	 p1forff2m<complex> vort1;  		 
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << " Eigenmode for Axisymmetric flow (written with generic macro)" << endl;
+    	 IFMACRO(OUTPUTTYPE,2DAxi)
+    	 file << "datatype " << typeFlow << "  datastoragemode CxP2P2P1.1 datadescriptors ux,ur,p,lambda" << endl;
+	     ENDIFMACRO
+	     IFMACRO(OUTPUTTYPE,3DAxi)
+    	 file << "datatype " << typeFlow << "  datastoragemode CxP2P2P2P1.1 datadescriptors ux,ur,uphi,p,lambda" << endl;
+	     ENDIFMACRO
+    	 string descriptionFF;
+    	 descriptionFF="real* Re int* m complex* eigenvalue  complex Pin complex Qin complex Pcav complex Qcav complex Pout complex Qout complex DQout int iter complex shift P1c vort1"; 
+	     file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << m << endl << real(ev) << " " << imag(ev) << endl;
+		 file << real(pin) << " " << imag(pin) << endl;
+		 file << real(qin) <<  " " << imag(qin) << endl;
+		 file << real(pcav) << " " << imag(pcav) << endl;
+		 file << real(qcav) <<  " " << imag(qcav) << endl;
+		 file << real(pout) << " " << imag(pout) << endl;
+		 file << real(qout) << " " << imag(qout) << endl;
+		 file << real(Dqout) <<  " " << imag(Dqout) << endl;
+		 file << real(shift) << " " << imag(shift) << " " << iter << endl << endl;
+		 vort1=-dY(u#x)+dX(u#r);
+		 for (int j=0;j<vort1[].n ; j++) {file << real(vort1[][j]) << " " << imag(vort1[][j]) << endl;};		
+		};
+//EOM	
+ENDIFMACRO
+
+
+
+//real eps = 1e-12; // desingularisation term for matrix B, useful with some solvers
+
+macro div(im,u) (dX(u#x)+dY(u#r)+u#r/y+im/y*u#phi)// macro for divergence 
+macro Grad(im,u) [
+			[dX(u#x), dY(u#x),  im/y*u#x ], 
+			[dX(u#r), dY(u#r),  im/y*u#r-u#phi/y],
+			[dX(u#phi),dY(u#phi), im/y*u#phi+u#r/y ]
+			] // macro for vecocity gradient tensor
+macro D(im,u) [	
+				[dX(u#x), 				.5*(dX(u#r)+dY(u#x)),  .5*(im/y*u#x+dX(u#phi)) ], 
+				[.5*(dX(u#r)+dY(u#x)), 	dY(u#r),				.5*(im/y*u#r-u#phi/y+dY(u#phi))],
+				[.5*(im/y*u#x+dX(u#phi)),  .5*(im/y*u#r-u#phi/y+dY(u#phi)), im/y*u#phi+u#r/y]
+				] // macro for rate-of-deformation tensor
+macro Conv(ima,ua,imb,ub,v) ( 
+              (Grad(ima,ua)*[ub#x,ub#r,ub#phi] + Grad(imb,ub)*[ua#x,ua#r,ua#phi])'*[v#x,v#r,v#phi]
+              			) // macro for mutual convection operator
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 4 : declare the problems 	
+//
+
+
+// varf for generalized eigenvalue problem: 
+varf   LNSE ([ux,ur,uphi,up],[vx,vr,vphi,vp]) =
+   int2d(th)( 
+   			(-2*nu*(D(1i*m,u):D(-1i*m,v))
+             + up*div(-1i*m,v)
+             + div(1i*m,u)*vp
+             - Conv(1i*m,u,0,Ub,v)
+             //+eps*vp*up
+             )*JJJ
+             )
+ - int2d(th)( shift*(ux*vx+ur*vr+uphi*vphi)*JJJ )
+ + BoundaryconditionsStability(u,v,m);
+ 
+varf   LNSEadjoint ([ux,ur,uphi,up],[vx,vr,vphi,vp]) =
+   int2d(th)( 
+   			(2*nu*(D(1i*m,u):D(-1i*m,v))
+             - up*div(-1i*m,v)
+             - div(1i*m,u)*vp
+             + Conv(-1i*m,v,0,Ub,u)
+             //+eps*vp*up
+             )*JJJ
+             )
+ - int2d(th)( conj(shift)*(ux*vx+ur*vr+uphi*vphi)*JJJ ) // warning that shift/eigenvalues of adjoint are complex conjugates of direct !
+ + BoundaryconditionsStability(u,v,m); 
+
+////// BUILD B-MATRIX //////////////////////////////////////////////////////////////
+varf b([ux,ur,uphi,up],[vx,vr,vphi,vp]) = int2d(th)( (ux*vx+ur*vr+uphi*vphi)*JJJ );
+matrix<complex> BFluid = b(XXXMh,XXXMh,solver=sparsesolver);  //////// see freefem++doc.pdf for the solver 
+////////////////////////////////////////////////////////////////////////////////////
+
+matrix<complex> OPNS, OPNSA;
+complex shiftOP,shiftOPA;
+
+
+////////////////////////////// Artificial compressibility ///////////////////////////////
+
+
+//end of the first line of B
+varf ZeroBlock([ux,ur,uphi,up],[vx,vr,vphi,vp]) = int2d(th)((0*vx+0*vr+0*vphi+0*vp)*JJJ);
+complex[int] mZero = ZeroBlock(0,XXXMh);
+matrix<complex> B2 =  [ [mZero,mZero,mZero,mZero,mZero,mZero,mZero] ];
+
+//end of the first column of B
+matrix<complex> B3 =   [[mZero'],
+						[mZero'],
+						[mZero'],
+						[mZero'],
+						[mZero'],
+						[mZero'],
+						[mZero']	];
+
+//block 4x4 on the bottom down of B
+complex[int,int] B4(7,7);
+B4(0,0) = 1;		B4(0,1) = 0;	 	B4(0,2) = 0;		B4(0,3) = 0;		B4(0,4) = 0;  B4(0,5) = 0; B4(0,6) = 0;
+B4(1,0) = 0; 		B4(1,1) = epsilon;	B4(1,2) = 0;		B4(1,3) = 0; 		B4(1,4) = 0;  B4(1,5) = 0; B4(1,6) = 0;
+B4(2,0) = 0; 		B4(2,1) = 0;		B4(2,2) = 1;		B4(2,3) = 0; 		B4(2,4) = 0;  B4(2,5) = 0; B4(2,6) = 0;
+B4(3,0) = 0; 		B4(3,1) = 0;		B4(3,2) = 0;		B4(3,3) = epsilon; 	B4(3,4) = 0;  B4(3,5) = 0; B4(3,6) = 0;
+B4(4,0) = 0; 		B4(4,1) = 0;		B4(4,2) = 0;		B4(4,3) = 0; 		B4(4,4) = 1;  B4(4,5) = 0; B4(4,6) = 0;
+B4(5,0) = 0;		B4(5,1) = 0;	 	B4(5,2) = 0;		B4(5,3) = 0;		B4(5,4) = 0;  B4(5,5) = 1; B4(5,6) = 0;
+B4(6,0) = 0; 		B4(6,1) = 0;		B4(6,2) = 0;		B4(6,3) = 0; 		B4(6,4) = 0;  B4(6,5) = 0; B4(6,6) = epsilon;
+
+matrix<complex> MB4 = B4;
+
+matrix<complex> B = [ 
+					  [BFluid, B2], 
+				      [B3,   MB4 ] 
+			        ];
+set(B,solver=sparsesolver);
+cout << "Matrix B has been built and factorised" << endl << "..." << endl;
+
+
+/////////////////////////////////
+//construction de OP = A -sigma*B
+/////////////////////////////////
+real Lin = int1d(th,1)(1.0);
+real Sin = int1d(th,1)(JJJ);
+
+real Llat = int1d(th,21)(1.0);
+real Slat = int1d(th,21)(JJJ);
+real XcIN = (pi/(4*Vin))*(1/Ma^2);
+real XcCAV = (pi/(4*Vcav))*(1/Ma^2);
+
+
+OPNS=LNSE(XXXMh,XXXMh,solver=sparsesolver); shiftOP = shift;
+
+// end of the first line of OP
+varf BCflowIN([ux,ur,uphi,up],[vx,vr,vphi,vp])  = int1d(th,1)( -JJJ*TGV*(vx*N.x+vr*N.y)/Sin );
+varf BCflowCAV([ux,ur,uphi,up],[vx,vr,vphi,vp])  = int1d(th,21)( -JJJ*TGV*(vx*N.x+vr*N.y)/Slat );
+varf BCpresOUT([ux,ur,uphi,up],[vx,vr,vphi,vp])  = int1d(th,3) (JJJ*vx) + int1d(th,31) (JJJ*vr);
+				
+complex[int] VBCflowIN   = BCflowIN(0,XXXMh);
+complex[int] VBCflowCAV   = BCflowCAV(0,XXXMh);
+complex[int] VBCpresOUT   = BCpresOUT(0,XXXMh);
+matrix<complex> OP2 = [ [mZero,VBCflowIN,mZero,VBCflowCAV,mZero,mZero,VBCpresOUT] ];
+
+varf BCpresIN([ux,ur,uphi,up],[vx,vr,vphi,vp]) = int1d(th,1)(vp/Lin);
+varf BCpresCAV([ux,ur,uphi,up],[vx,vr,vphi,vp]) = int1d(th,21)(vp/Llat);
+varf QOUT ([ux,ur,uphi,up],[vx,vr,vphi,vp]) = int1d(th,3) (JJJ*vx) + int1d(th,31) (JJJ*vr);
+complex[int] VBCpresIN = BCpresIN(0,XXXMh);
+complex[int] VBCpresCAV = BCpresCAV(0,XXXMh);
+complex[int] VQOUT = QOUT(0,XXXMh);
+
+matrix<complex> OP3 = [ [mZero'],
+						[VBCpresIN'],
+						[mZero'],
+					    [VBCpresCAV'],
+						[mZero'],
+						[mZero'],
+						[VQOUT'] 
+					  ];
+
+complex[int,int] V4(7,7);
+V4(0,0) = 0 - shift*1;	V4(0,1) = -XcIN; 			V4(0,2) = 0;			V4(0,3) = 0;			V4(0,4) = 0;   			V4(0,5) = 0; V4(0,6) = 0;
+V4(1,0) = -1; 			V4(1,1) = - shift*epsilon;	V4(1,2) = 0;			V4(1,3) = 0; 			V4(1,4) = 0;   			V4(1,5) = 0; V4(1,6) = 0;
+V4(2,0) = 0;			V4(2,1) = 0; 				V4(2,2) = 0 - shift*1;	V4(2,3) = XcCAV;		V4(2,4) = 0;   			V4(2,5) = 0; V4(2,6) = 0;
+V4(3,0) = 0; 			V4(3,1) = 0;				V4(3,2) = -1;			V4(3,3) = - shift*epsilon; 	V4(3,4) = 0;		V4(3,5) = 0; V4(3,6) = 0;
+V4(4,0) = 0; 			V4(4,1) = 0;				V4(4,2) = 0;			V4(4,3) = 0; 			V4(4,4) = 0 - shift*1;  V4(4,5) = 1; V4(4,6) = 0;
+V4(5,0) = 0; 			V4(5,1) = 0;				V4(5,2) = 0;			V4(5,3) = 0; 			V4(5,4) = 0;			V4(5,5) = 0 - shift*1; V4(5,6) = 8./Ma;
+V4(6,0) = 0; 			V4(6,1) = 0;				V4(6,2) = 0;			V4(6,3) = 0; 			V4(6,4) = -1;			V4(6,5) = 0; V4(6,6) = 0 - shift*epsilon;
+matrix<complex> OP4=V4;
+
+matrix<complex> OP =    [ 
+							[OPNS, OP2], 
+							[OP3 ,  OP4 ] 
+						];
+set(OP,solver=sparsesolver);
+cout << "matrix OP = A - sigma*B built" << endl << "..." << endl;
+
+// Solver eigenproblem related variables
+
+complex[int] ev(nev); // Eigenvalues
+XXXMh<complex> [int] [eux,eur,euphi,eup](nev);   // Fluid part of Eigenvectors
+
+complex[int] PinEV(nev),QinEV(nev),PcavEV(nev),QcavEV(nev),Qout(nev),DQout(nev),Pout(nev);	// Scalar part of eigenvector
+complex[int,int]  EigVec(OP.n,nev);	// Full eigenvectors
+
+
+
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5(a) : solves the problem (Arnoldi mode for nev>1)
+//
+
+cout << "$$ Building matrices..." ;
+////// BUILD OP-MATRIX=A-lambda*B //////////////////////////////////////////////////////////////
+if(iadjoint=="A")
+{ OP=LNSEadjoint(XXXMh,XXXMh,solver=sparsesolver); shiftOP = conj(shift); }
+cout << "$$ ... done !" << endl;
+////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////// CALL TO ARPACK++ ////////////////////////////////// //////////
+int k=EigenValue(OP,B,sigma=shiftOP,value=ev,rawvector=EigVec,tol=1e-6,maxit=0,ncv=ncv);    //Arpack call
+if(iadjoint=="A") { ev = conj(ev); } ;
+////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 6(a) : post-processing for nev>1
+//
+
+	string namefile;
+    namefile=ffdatadir+"Spectrum.txt";
+    ofstream fileVP1(namefile); 
+	
+	for (int i=0;i<nev;i++)
+	{
+		[eux[i][],PinEV(i),QinEV(i),PcavEV(i),QcavEV(i),Qout(i),DQout(i),Pout(i)]=EigVec(:,i);
+		complex Qnorm = int1d(th,1,11)(JJJ*(eur[i]*N.y+eux[i]*N.x));
+		cout << "QNorm = " << Qnorm << endl;
+        real L2norm = EigVec(:,i).l2;
+		EigVec(:,i) = 1./Qnorm * EigVec(:,i);	//normalisation of the vector vol flux inlet = vol flux hole = 1
+		[eux[i][],PinEV(i),QinEV(i),PcavEV(i),QcavEV(i),Qout(i),DQout(i),Pout(i)]=EigVec(:,i);
+		Qnorm = int1d(th,1,11)(JJJ*(eur[i]*N.y+eux[i]*N.x));
+		cout << "QNorm = " << Qnorm << endl;
+
+       	fileVP1 << real(ev[i]) << " " << imag(ev[i]) << " " << Re << " " << 0 << " " << real(shift) << " " << imag(shift) << endl;
+       	cout << "$$ valeur propre : " << i+1 << "  : " << ev[i] << endl;
+       	IFMACRO(OUTPUTTYPE,2DAxi)
+		if(iadjoint=="D"){namefile=ffdatadir+"Eigenmode"+(i+1);}
+		else{namefile=ffdatadir+"EigenmodeA"+(i+1);};
+		{
+			ofstream fileMode(namefile+".txt");
+			[uAxix,uAxir,uAxip] = [eux[i],eur[i],eup[i]];
+			fileMode << uAxix[]; 
+			fileMode << endl << endl << Re << endl << endl << real(ev[i]) << "   " << imag(ev[i])  << endl;
+		}
+	 	ENDIFMACRO
+	 	IFMACRO(OUTPUTTYPE,3DAxi)
+			if(iadjoint=="D"){namefile=ffdatadir+"Eigenmode"+(i+1);}
+			else{namefile=ffdatadir+"EigenmodeA"+(i+1);};
+			{
+				ofstream fileMode(namefile+".txt");
+				ux[] = eux[i][];
+				fileMode << ux[]; 
+				fileMode << endl << endl << Re << endl << endl << real(ev[i]) << "   " << imag(ev[i])  << endl;
+			}
+	 	ENDIFMACRO
+
+ 		 cout << "$$ Writing eigenmode in file " << namefile << endl;
+ 		 SFWriteMode(namefile+".ff2m",u,PinEV(i),QinEV(i),PcavEV(i),QcavEV(i),Qout(i),DQout(i),Pout(i),ev[i],shift,m,"EigenModeD",1);	 // MACRO DEFINED in StabFem_Macros.edp
+ 		 
+ 	};
+
+
+
+cout << "$$ SUCCESSFULLY LEAVING Stab_Axi.edp " << endl;

@@ -1,0 +1,101 @@
+
+// Program Stabilizers_GDSUPG_2D.idp
+// 
+// Stabilization terms for linearization of Navier-Stokes : Grad-Div and SUPG
+//
+// Adapted from a code by O. Marquet, oct 2020, original name NewComputeSTABILISATIONPk.idp 
+// Incorporated in StabFem, 10/12/2021, DF.
+//
+// This code requires the following data structures :
+// Base Flow : [ubx,uby,ubp]
+// Perturbations : [ux,uy,up] (Newton increment or eigenmode)
+//
+// At the end the stabilizers simply have to be used in the following way:
+//
+// StabilizationNS(ub,uh)              to be added in NS equations 
+// LinStabilizationNS(u,uh)            to be added in LNS eqs. 
+// warning sign in stability solvers this is actually (-LinStabilizationNS(u,uh) to be added)   
+
+// DEFINITION 
+
+fespace fstab(th,P1);
+fstab TauSUPG,dTauSUPGdu,dTauSUPGdv,TauGradDiv,dTauGradDivdu,dTauGradDivdv;
+
+macro GRAD1(var) [dx(var),dy(var)] //EOM
+macro DIV(u) ( dx(u#x)+dy(u#y) )  // EOM
+macro CONV(u,a) [ u#x*dx(a#x)+u#y*dy(a#x), u#x*dx(a#y)+u#y*dy(a#y) ]  //EOM
+macro StrongLAP(u) [(2*dxx(u#x)+dyy(u#x)+dyx(u#y)),(2*dyy(u#y)+dxy(u#x)+dxx(u#y))] //EOM
+
+macro StrongResiduNS(u) 
+( CONV(u,u) + GRAD1(u#p) -nu*StrongLAP(u) ) 
+// EOM
+
+macro LinStrongResiduNS(u) 
+( CONV(u#b,u) + CONV(u,u#b) + GRAD1(u#p) -nu*StrongLAP(u) ) 
+// EOM
+
+macro dTauSUPG(u) (dTauSUPGdu*u#x+dTauSUPGdv*u#y) //EOM -> NOW USE THIS ONE
+
+macro dTauGradDiv(u) (dTauGradDivdu*u#x+dTauGradDivdv*u#y) //EOM -> NOW USE THIS ONE
+
+macro StabilizationNS(ub,uh) 
+	( 
+	isSUPG*TauSUPG*CONV(ub,uh)'*StrongResiduNS(ub)  + isGradDiv*TauGradDiv*DIV(ub)*DIV(uh)
+	)
+//EOM
+
+macro LinStabilizationNS(u,uh)
+	( 
+	isSUPG* ( ( TauSUPG*CONV(u,uh) + dTauSUPG(u)*CONV(u#b,uh) ) '* StrongResiduNS(u#b)
+	+ TauSUPG*CONV(u#b,uh)'*LinStrongResiduNS(u) )
+	+ isGradDiv*( TauGradDiv*DIV(u) + dTauGradDiv(u)*DIV(u#b) )*DIV(uh)
+	)
+//EOM
+
+macro vbx() ubx //EOM
+macro vby() uby //EOM
+macro vbp() ubp //EOM 
+
+macro ComputeStabilizers
+{
+fespace f000(th,P0);
+f000 hT;
+fstab NormeT,ReTU;
+fstab dNormeTdu,dNormeTdv,dReTdu,dReTdv,dReTUdu,dReTUdv;
+
+hT         = sqrt(2.)*area/hTriangle;
+NormeT     = sqrt(ubx^2+uby^2)+1e-10;
+ReTU       = 0.5*NormeT*hT/(nu);
+
+
+dNormeTdu  = ubx/NormeT;
+dNormeTdv  = uby/NormeT;
+dReTUdu    = 0.5*dNormeTdu*hT/(nu);
+dReTUdv    = 0.5*dNormeTdv*hT/(nu);
+
+TauGradDiv = hT^2*NormeT; 
+dTauGradDivdu = hT^2*dNormeTdu;
+dTauGradDivdv = hT^2*dNormeTdv;
+
+TauSUPG    = 0.5*hT/NormeT*(1/tanh(ReTU)-1/ReTU);
+dTauSUPGdu = -0.5*hT/NormeT^2*(1/tanh(ReTU)-1/ReTU)*dNormeTdu  + 0.5*hT/NormeT*( (1-1/tanh(ReTU)^2)+ 1/ReTU^2)*dReTUdu ;
+dTauSUPGdv = -0.5*hT/NormeT^2*(1/tanh(ReTU)-1/ReTU)*dNormeTdv  + 0.5*hT/NormeT*( (1-1/tanh(ReTU)^2)+ 1/ReTU^2)*dReTUdv ;
+
+/* alternative */
+  real order     = 2.;
+  real dimensionSUPG = 2.; /* number of dimension*/
+  real c1        = 4;
+  real c2        = sqrt(c1);
+  TauSUPG    = ( dimensionSUPG*c1^2*nu^2/(hT/order)^4 + c2^2*NormeT/(hT/order)^2 )^(-0.5);
+  dTauSUPGdu = -0.5*dNormeTdu*( c2^2/(hT/order)^2 )*( dimensionSUPG*c1^2*nu^2/(hT/order)^4 + c2^2*NormeT/(hT/order)^2 )^(-3/2);
+  dTauSUPGdv = -0.5*dNormeTdv*( c2^2/(hT/order)^2 )*( dimensionSUPG*c1^2*nu^2/(hT/order)^4 + c2^2*NormeT/(hT/order)^2 )^(-3/2);
+
+/* another alternative */
+   fstab chiT, dchiT;
+   chiT       = (ReTU<=3)*(ReTU/3.) + (ReTU>3)*(1.);
+   TauSUPG    = chiT*hT/(2.*NormeT);
+   dchiT      = (1./3.)*(ReTU<3.);
+   dTauSUPGdu = (hT/2.)*( - (chiT/(NormeT^2))*dNormeTdu + dchiT*dReTdu/NormeT );
+   dTauSUPGdv = (hT/2.)*( - (chiT/(NormeT^2))*dNormeTdv + dchiT*dReTdv/NormeT );
+}
+//EOM

@@ -1,0 +1,552 @@
+//
+//  PROGRAM WeaklyNonLinear_2D.edp
+//	
+//	Solves directly the Harmonic-Balance equations to decribe the limit cycle with two time-Fourier modes
+//   
+//
+//  INPUT PARAMETERS : none
+//
+//
+//	INPUT FILES :
+//		BaseFlow.txt	
+//      EigenMode.txt
+//		EigenModeA.txt 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//      WNL.ff2m 
+//
+// 	ERROR MANAGEMENT : 
+//      if Newton iteration diverges, SelfConsistentMode.txt is not generated and "iter" parameter in Eigenmode.ff2m is -1.
+//
+
+
+
+//load "MUMPS_seq"
+include "SF_Geom.edp";
+include "StabFem.idp";
+
+/////////////////////////////////////////////////////////////////////////////////
+
+string symmetryBaseFlow = "S"; /// TO BE DONE IN A BETTER WAY
+string symmetry = "A"; /// TO BE DONE IN A BETTER WAY
+
+
+
+string normalisation;
+cout << " Normalisation choice ?  [none, L, E or V] " << endl << "         ( V = Velocity at on point (S&L) ; E = Energy (Mantic-lugo), L = lift force )" << endl;
+cin >> normalisation ;
+cout << " --> " << normalisation << endl;
+
+string AdjointType;
+cout << " What kind of adjoint ?  [dA or cA] " << endl 
+<< "           ( dA for discrete adjoint ; cA for continuous adjoint )" << endl;
+cin >> AdjointType ;
+cout << " --> "  << AdjointType << endl;
+
+real Recheck;
+cout << " Give a value of Reynolds number to generate 'guess'  fields for selfconsistent/HarmonicBalance  ? " 
+		<< endl << "       (type -1 if you don't want this)" << endl;
+cin >> Recheck;
+cout << " --> " << Recheck << endl;
+
+
+
+mesh th=readmesh(ffdatadir+"mesh.msh");                    ///// Read mesh
+//int bclat=4,bcinlet=1,bcoutflow=3,bcwall=2,bcaxis=6; // no longer in the customization file. These lavels are now written explicitly
+
+
+
+
+
+/////////////////////////////////////////////////////////////////////////////////
+
+fespace Xh(th,P2);             ////// f.e. space for vel.
+fespace Mh(th,P1);            ////// f.e. space for pressure
+fespace XXMh(th,[P2,P2,P1]); ////// f.e. space for triplet [u,v,p]
+macro defU(u)[u#x,u#y,u#p]//EOF  
+
+XXMh [ubx,uby,ubp]; // base flow 
+XXMh<complex> [u1x,u1y,u1p];    //eigenmode 
+XXMh<complex> [u1Cx,u1Cy,u1Cp];    //eigenmode conjugate   
+XXMh<complex> [u1Ax,u1Ay,u1Ap];    //Adjoint   
+XXMh<complex> [u1ACx,u1ACy,u1ACp];    //Conjugate of Adjoint  
+
+XXMh defU(ueps); // base flow correction
+XXMh<complex> defU(u20), defU(u22);    //terms |A|^2 and A^2
+XXMh<complex> defU(u22C);    //term complex conjugate ofA^2 
+
+XXMh<complex> defU(u3A); // u_3^{A}
+XXMh<complex> defU(u3A20); // u_3^{A|A|^2}
+XXMh<complex> defU(u3A22); //  u_3^{A\overline{A}A^2}
+XXMh<complex> defU(u3A3); //  u_3^{A^3}
+XXMh<complex> defU(u3AC); // c.c u_3^{A}
+XXMh<complex> defU(u3A20C); // c.c u_3^{A|A|^2}
+XXMh<complex> defU(u3A22C); // c.c u_3^{A\overline{A}A^2}
+XXMh<complex> defU(u3A3C); // c.c u_3^{A^3}
+
+XXMh<complex> defU(u40); // u_4^{0}
+XXMh<complex> defU(u4Aabs2); // u_4^{|A|^2}
+XXMh<complex> defU(u4Aabs4); // u_4^{|A|^4}
+
+XXMh<complex> defU(u4A2), defU(u4A2C); // u_4^{A^2}
+XXMh<complex> defU(u4A4), defU(u4A4C); // u_4^{A^4}
+XXMh<complex> defU(u4A2Aabs2), defU(u4A2Aabs2C); // u_4^{A^2|A|^2}
+
+XXMh [vx,vy,vp]; // test functions
+XXMh<complex> [vCx,vCy,vCp]; // test functions
+
+real Re, ReC, Omegax, omegaC, sigmaC;
+
+     
+////////////////////////////////////////////////////////////////////////////////
+
+macro div(u) (dx(u#x)+dy(u#y))//EOM macro for divergence 
+macro Conv(ua,ub,v) ( 
+              ((ua#x*dx(ub#x)+ua#y*dy(ub#x))+(ub#x*dx(ua#x)+ub#y*dy(ua#x)))*v#x 
+            + ((ua#x*dx(ub#y)+ua#y*dy(ub#y))+(ub#x*dx(ua#y)+ub#y*dy(ua#y)))*v#y 
+                    ) //EOM macro for mutual convection operator
+macro D(u) [[dx(u#x), .5*(dx(u#y)+dy(u#x))], [.5*(dx(u#y)+dy(u#x)), dy(u#y)]] //EOM macro for rate-of-deformation tensor
+
+macro innerB(u,v) (u#x*v#x + u#y*v#y)//EOM
+
+macro NS(nu,u,v) 
+		(
+		 -2*nu*(D(u):D(v))
+        + u#p*div(v)
+        + v#p*div(u)
+        - .5*Conv(u,u,v)
+        )
+//EOM
+     
+macro NSL(nu,U,u,v) 
+		(
+		-2*nu*(D(u):D(v))
+        + u#p*div(v)
+        + div(u)*v#p
+        - Conv(U,u,v)
+        )
+//EOM
+
+macro NSLOmega(nu,U,u,v,order) (NSL(nu,U,u,v) - (order*1i*omegaC*innerB(u,v)))
+// EOM
+
+
+        
+macro Boundaryconditions(u,v,symmetry)
+	           on(1,u#x=0.0,u#y=0.0) 
+             + on(2,21,22,23,u#x=0.0,u#y=0.0)
+             + int1d(th,6)(u#x*v#x*1e30*(symmetry=="A")+u#y*v#y*1e30*(symmetry=="S"))
+// 
+
+macro Lift(nu,u1,u2,p)   
+	(
+	int1d(th,2,21,22,23)(2*p*N.y)
+	+int1d(th,2,21,22,23)( -2*nu*(2*dy(u2)*N.y+(dx(u2)+dy(u1))*N.x))
+	)
+//
+macro Drag(nu,u1,u2,p)   
+	(
+	int1d(th,2,21,22,23)(2*p*N.x)
+	+int1d(th,2,21,22,23)( -2*nu*(2*dx(u1)*N.x+(dx(u2)+dy(u1))*N.y))
+	)
+//
+
+
+       
+
+
+{
+ifstream cbin(ffdatadir+"BaseFlow.txt");
+cbin >> ubx[] >> Re >> Omegax ;
+cout << "Drag of guess mean flow : " << Drag(1/Re,ubx,uby,ubp) << endl;
+}
+real epsilonTT, signL0;
+if(Re > Recheck){ sqrt(1/Re-1/Recheck); signL0 = 1; }
+else{ sqrt(1/Recheck-1/Re); signL0 = 1; }
+
+
+{
+cout << "Reading Eigenmode.txt" << endl;
+ifstream cbin(ffdatadir+"Eigenmode.txt");
+cbin >> u1x[]  >> sigmaC >> omegaC; 
+}
+
+
+{
+cout << "Reading EigenmodeA.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeA.txt");
+cbin >> u1Ax[] ; 
+}
+// Needed for renormalization
+u1Cx[] = conj(u1x[]);
+u1ACx[] = conj(u1Ax[]);
+
+
+
+
+if(normalisation=="none")
+	{ cout << " -> No normalization for the mode " << endl;}
+else if(normalisation=="L")
+	{
+		cout << " -> Normalisation of mode based on LIFT  " << endl;
+		real Liftguess = 0.5; // normalize so that lift is 0.5 ; total lift (including cc) is 1 ; lift coef. is .5
+		
+		cout << "  -> Fy = " << Liftguess  << endl;
+
+		cout << "Fy before renarmalisation : " << Lift(1/Re,u1x,u1y,u1p) << endl;
+		complex modenorm = Lift(1/Re,u1x,u1y,u1p);
+		u1x[] = Liftguess/modenorm*u1x[]; 
+			cout << "Fy after renarmalisation : " << Lift(1/Re,u1x,u1y,u1p) << endl;	
+	}	
+else if(normalisation=="E")
+		{
+		cout << " -> Normalisation of mode based on ENERGY OF PERTURBATION (Mantic-lugo convention)  " << endl;
+		real Eguess = 1;
+		cout << "  -> Energy = " << Eguess << endl;
+
+		cout << "Energy before renormalisation : " << int2d(th)(innerB(u1,u1AC)) << endl;
+		complex modenorm = int2d(th)(innerB(u1C,u1));
+		u1x[] = u1x[]/sqrt(modenorm); // first normalize so that imag part of lift is zero
+		complex bimodenorm = int2d(th)(innerB(u1AC,u1));
+		u1Ax[] = u1Ax[]/conj(bimodenorm);
+		u1Cx[] = conj(u1x[]);
+		u1ACx[] = conj(u1Ax[]);
+		modenorm = int2d(th)(innerB(u1C,u1));
+		cout << "Energy after renormalisation : " << modenorm << endl;	
+		bimodenorm = int2d(th)(innerB(u1AC,u1));
+		cout << "Normalization of adjoint : " << bimodenorm << endl;	
+		}
+else if(normalisation=="V")
+		{
+			cout << " -> Normalisation of mode based on velocity at one point (Sipp & lebedev convention)  " << endl;
+		complex Vpoint = u1y(1,0); // convention of Sipp & Lebedev
+		cout << "Energy before renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;
+		complex modenorm = Lift(1/Re,u1x,u1y,u1p);
+		u1x[] = 0.4612/Vpoint*u1x[];  // convention of Sipp & Lebedev
+		cout << "Energy after renarmalisation : " << sqrt(4*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl;	
+		};
+
+
+
+
+real nu = 1/Re;
+
+
+/////////////////////////////////////////////////////////////////////////////////
+//////// ORDER 2
+
+cout << " Solving problems at order 2 :" << endl;
+
+solve varfEpsilon([uepsx,uepsy,uepsp],[vx,vy,vp]) =
+  	 int2d(th)( NSL(nu,ub,ueps,v) )
+	+ int2d(th) (2*signL0*(D(ub):D(v))) 
+    + Boundaryconditions(ueps,v,"S")			
+	;
+	
+solve varf20([u20x,u20y,u20p],[vCx,vCy,vCp]) =
+  	 int2d(th)( NSL(nu,ub,u20,vC) )
+	- int2d(th)( Conv(u1,u1C,vC) ) 
+    + Boundaryconditions(u20,vC,"S")			
+	;
+	
+solve varf22([u22x,u22y,u22p],[vCx,vCy,vCp]) =
+  	 int2d(th)( NSL(nu,ub,u22,vC) ) -int2d(th)(2i*omegaC*(u22x*vCx+u22y*vCy) )
+	- int2d(th)(.5*Conv(u1,u1,vC) ) 
+    + Boundaryconditions(u22,vC,"S")			
+	;
+
+real Fx0 = Drag(nu,ubx,uby,ubp);
+real Fxeps2 = (Drag(nu,uepsx,uepsy,uepsp)-Drag(1,ubx,uby,0));
+real FxA20 = real(Drag(nu,u20x,u20y,u20p));
+complex FxA22 = Drag(nu,u22x,u22y,u22p);
+complex FyA1 = Lift(1/Re,u1x,u1y,u1p)*2;
+
+
+cout << " Fx associated to order epsilon correction : " << Fxeps2 << endl;
+cout << " Fx associated to order |A|^2  : " << FxA20 << endl;
+cout << " Fx associated to order A^2  : " << FxA22 << endl;
+
+
+
+/////////////////////////////////////////////////////////////////////////////////
+//////// ORDER 3
+// TODO: NOT SURE OF SYMMETRY OF B.C. TESTED WITH FULL DOMAIN
+cout << " Solving problems at order 3 :" << endl;
+varf varf312(defU(u),defU(v))=-int2d(th)(innerB(u1,v)) + Boundaryconditions(u,v,"S");
+varf varf321(defU(v),defU(u))=int2d(th)(innerB(u1A,u));
+varf varf311(defU(u),defU(v))=int2d(th)(NSL(nu,ub,u,v)) + Boundaryconditions(u,v,"S");
+
+varf varf3A3(defU(u),defU(v))=int2d(th)(NSLOmega(nu,ub,u,v,3)  ) 
+								+ Boundaryconditions(u,v,"S");
+
+
+varf NLF3A(defU(u),defU(v)) =-int2d(th)(Conv(u1,ueps,v)) + int2d(th) (2*signL0*(D(u1):D(v))) + Boundaryconditions(u,v,"S");
+varf NLF3A20(defU(u),defU(v)) =-int2d(th)(Conv(u1,u20,v)) + Boundaryconditions(u,v,"S");
+varf NLF3A22(defU(u),defU(v)) =-int2d(th)(Conv(u1C,u22,v)) + Boundaryconditions(u,v,"S");
+varf NLF3A3(defU(u),defU(v)) =-int2d(th)(Conv(u1,u22,v)) + Boundaryconditions(u,v,"S");
+
+
+
+cout << "constructing rhs... " << endl;
+
+complex[int] RHSF3A1(ubx[].n); RHSF3A1 = NLF3A(0,XXMh,tgv=-1);
+complex[int] RHSF3A = [RHSF3A1, 0];
+
+complex[int] RHSF3A201(ubx[].n); RHSF3A201 = NLF3A20(0,XXMh,tgv=-1);
+complex[int] RHSF3A20 = [RHSF3A201, 0];
+
+complex[int] RHSF3A221(ubx[].n); RHSF3A221 = NLF3A22(0,XXMh,tgv=-1);
+complex[int] RHSF3A22 = [RHSF3A221, 0];
+
+complex[int] RHSF3A3 = NLF3A3(0,XXMh,tgv=-1);	
+
+
+
+matrix<complex> matLinOp11 = varf311(XXMh,XXMh,tgv=-1);
+complex[int] matLinOp12 = varf312(0,XXMh,tgv=-1);
+complex[int] matLinOp21 = varf321(0,XXMh,tgv=-1);
+
+matrix<complex> LinOp = [	[matLinOp11, matLinOp12],
+					[matLinOp21',0]
+			   ];
+
+matrix<complex> matLinOp3A3 = varf3A3(XXMh,XXMh,tgv=-1);
+
+cout << " Assembling matrix... done" << endl;
+
+cout << " LU-ing matrix..." << endl;
+set(LinOp,solver=sparsesolver);
+set(matLinOp3A3,solver=sparsesolver);
+cout << " LU-ing matrix... done" << endl;
+
+
+complex Lambda, Nu0, Nu2;
+complex[int] dX(LinOp.n);
+
+// Solve u_3^{A}
+dX = LinOp^-1*RHSF3A;
+[u3Ax[], Lambda] = dX; u3ACx[] = conj(u3Ax[]); Lambda = -Lambda;
+// Solve u_3^{A|A|^2}
+dX = LinOp^-1*RHSF3A20;
+[u3A20x[], Nu0] = dX; u3A20Cx[] = conj(u3A20x[]);
+// Solve u_3^{A\overline{A}A^2}
+dX = LinOp^-1*RHSF3A22;
+[u3A22x[], Nu2] = dX; u3A22Cx[] = conj(u3A22x[]);
+// Solve u_3^{A^3}
+u3A3x[] = matLinOp3A3^-1*RHSF3A3; u3A3Cx[] = conj(u3A3x[]);
+
+
+cout << "Lambda : "  << Lambda << " ; Nu0 = " << Nu0 << " ; Nu2 = " << Nu2 << endl;
+cout << "l1 coeff " << real(Nu0+Nu2)/omegaC << endl;
+
+
+/////////////////////////////////////////////////////////////////////////////////
+//////// ORDER 4
+cout << " Solving problems at order 4 :" << endl;
+
+varf varf4Om0(defU(u),defU(v))=int2d(th)(NSLOmega(nu,ub,u,v,0) )  + Boundaryconditions(u,v,"S");
+
+varf varf4Om2(defU(u),defU(v))=int2d(th)(NSLOmega(nu,ub,u,v,2) )  + Boundaryconditions(u,v,"S");
+
+varf varf4Om4(defU(u),defU(v))=int2d(th)(NSLOmega(nu,ub,u,v,4) )  + Boundaryconditions(u,v,"S");
+
+
+varf NLF40(defU(u),defU(v)) = -int2d(th)(.5*Conv(ueps,ueps,v)) + int2d(th) (2*signL0*(D(ueps):D(v))) + Boundaryconditions(u,v,"S");
+
+varf NLF4Aabs2(defU(u),defU(v)) = -int2d(th)(Conv(u3AC,u1,v) + Conv(u3A,u1C,v) + Conv(ueps,u20,v)) 
+								  + int2d(th) (2*signL0*(D(u20):D(v))) + Boundaryconditions(u,v,"S");
+
+varf NLF4Aabs4(defU(u),defU(v)) = -int2d(th)(Conv(u22,u22C,v) + 0.5*Conv(u20,u20,v) + Conv(u3A20C,u1,v) +  Conv(u3A20,u1C,v)
+									+ Conv(u3A22C,u1,v) +  Conv(u3A22,u1C,v)) + Boundaryconditions(u,v,"S");
+
+varf NLF4A2(defU(u),defU(v)) = -int2d(th)(Conv(ueps,u22,v) + Conv(u3A,u1,v)) 
+								  + int2d(th) (2*signL0*(D(u22):D(v))) + Boundaryconditions(u,v,"S");
+
+
+varf NLF4A2Aabs2(defU(u),defU(v)) = -int2d(th)(Conv(u20,u22,v) + Conv(u3A20,u1,v) + Conv(u3A22,u1C,v) +  Conv(u3A3,u1C,v) ) 
+							   		+ Boundaryconditions(u,v,"S");
+
+varf NLF4A4(defU(u),defU(v)) = -int2d(th)(0.5*Conv(u22,u22,v) + Conv(u3A3,u1,v) ) 
+							   			  + Boundaryconditions(u,v,"S");
+
+
+complex[int] RHSF3A0 = NLF40(0,XXMh,tgv=-1);
+complex[int] RHSF3Aabs2 = NLF4Aabs2(0,XXMh,tgv=-1);
+complex[int] RHSF3Aabs4 = NLF4Aabs4(0,XXMh,tgv=-1);
+
+complex[int] RHSF3A2 = NLF4A2(0,XXMh,tgv=-1);
+complex[int] RHSF3A2Aabs2 = NLF4A2Aabs2(0,XXMh,tgv=-1);
+complex[int] RHSF3A4 = NLF4A4(0,XXMh,tgv=-1);
+
+matrix<complex> matLinOp4Om0 = varf4Om0(XXMh,XXMh,tgv=-1);
+matrix<complex> matLinOp4Om2 = varf4Om2(XXMh,XXMh,tgv=-1);
+matrix<complex> matLinOp4Om4 = varf4Om4(XXMh,XXMh,tgv=-1);
+
+cout << " Assembling matrix... done" << endl;
+
+cout << " LU-ing matrix..." << endl;
+set(matLinOp4Om0,solver=sparsesolver);
+set(matLinOp4Om2,solver=sparsesolver);
+set(matLinOp4Om4,solver=sparsesolver);
+cout << " LU-ing matrix... done" << endl;
+
+// Solve for u_4^{0}
+u40x[] = matLinOp4Om0^-1*RHSF3A0;
+// Solve for u_4^{|A|^2}
+u4Aabs2x[] = matLinOp4Om0^-1*RHSF3Aabs2;
+// Solve for u_4^{|A|^4}
+u4Aabs4x[] = matLinOp4Om0^-1*RHSF3Aabs4;
+
+// Solve for u_4^{A^2}
+u4A2x[] = matLinOp4Om2^-1*RHSF3A2; u4A2Cx[] = conj(u4A2x[]);
+// Solve for u_4^{A^4}
+u4A2Aabs2x[] = matLinOp4Om2^-1*RHSF3A2Aabs2; u4A2Aabs2Cx[] = conj(u4A2Aabs2x[]);
+// Solve for u_4^{A^2|A|^2}
+u4A4x[] = matLinOp4Om4^-1*RHSF3A4; u4A2Cx[] = conj(u4A2x[]);
+
+
+/////////////////////////////////////////////////////////////////////////////////
+/////// ORDER 5
+cout << " Computing coeffs at order 5 :" << endl;
+
+
+
+complex Cn;
+Cn = int2d(th)(innerB(u1AC,u1));
+cout << " Cn : " << Cn << endl;
+
+complex LambdaEps2 = -1/Cn*int2d(th)(Conv(ueps,u3A,u1AC) + Conv(u1,u40,u1AC) - 2*signL0*(D(u3A):D(u1AC)));
+
+complex c1Eps2 = 1/Cn*int2d(th)(Conv(ueps,u3A20,u1AC) + Conv(ueps,u3A22,u1AC) + Conv(u20,u3A,u1AC) + 
+							 Conv(u22,u3AC,u1AC) + Conv(u1,u4Aabs2,u1AC) + Conv(u1C,u4A2,u1AC) + 
+							-2*signL0*(D(u3A20):D(u1AC)) - 2*signL0*(D(u3A22):D(u1AC)) );
+
+complex c2Eps2 = 1/Cn*int2d(th)(Conv(u20,u3A20,u1AC) + Conv(u20,u3A22,u1AC) + Conv(u22,u3A20C,u1AC) 
+							 + Conv(u22,u3A22C,u1AC) + Conv(u22C,u3A3,u1AC) + Conv(u1,u4Aabs4,u1AC) 
+							 + Conv(u1C,u4A2Aabs2,u1AC) );
+	
+
+
+
+
+
+
+
+
+
+
+
+
+
+real AAA = sqrt(abs(real(Lambda)/real(Nu0+Nu2))); /// amplitude/sqrt(eps) ; value depends on normalisation choice
+// Even thought it does not have sense in the subcritical case, I added the abs to be error free.
+
+cout << endl << endl << "######### SUMMARY : ##############" << endl << endl;
+
+cout << endl << "  >>  Amplitude :  A = " << AAA << " * epsilon^(1/2) " << endl;
+cout << "  >>  In terms of Energy = " << AAA*sqrt(2*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << " * eps " << endl;
+cout << "  >>  In terms of Lift force : Fy = [" << AAA*FyA1 << " exp(i omega0 t) + c.c. ] * eps" << endl;
+cout << "                             : Fy = " << real(AAA*FyA1*2) << " cos(omega0 t) + " 
+                                                     << -imag(AAA*FyA1*2) << " sin(omega0 t) ] * eps" << endl;
+
+cout << " >> Drag force  = Fx0 + Fxeps2 * eps^2 + FxA20 *|A|^2 + |A^2| * [FxA22 exp(2 i omega0 t ) + c.c. ]"  << endl;
+cout << "                      = " << Fx0 << " + " << Fxeps2 << " * eps + << " << -FxA20 << " * |A|^2 + [" << FxA22 << " exp(2 i omega0 t) + c.c.] |A|^2 "  << endl << endl;
+cout << "                      = Fx0 + [ Fxeps2 + CxA20*(A^2/eps^2)] * eps^2 " 
+                            << " +  [ 2*Re(FxA22)*cos( 2 omega0 t ) - 2*Im(FxA22)*sin( 2 omega0 t ) ] * "  << endl;
+cout << "                      = " << Fx0 << " + " << (Fxeps2 + FxA20*AAA^2) << " * eps^2 + [ " << real(2*FxA22)*AAA^2 << " * cos(2 omega0 t ) + " 
+																					<< -imag(2*FxA22)*AAA^2 << " * sin(2 omega0 t ) ] * eps^2"   << endl;
+         
+         
+cout << endl << "  >> Frequency = omega0 + im(Lambda)*eps - im(nu0+nu2)*|A|^2 "  << endl;
+cout << endl << "               = " << omegaC <<  " + " << imag(Lambda) - imag(Nu0+Nu2)*AAA^2 << " * eps^2 "  << endl;
+        
+                                                  
+real omegaNL;
+if(Recheck>0)
+{
+
+cout << endl<< endl << " #####  EVALUATION FOR Re = " << Recheck << " AND GENERATION OF guesses for nonlinear approaches ############" << endl;
+cout << "  >>  Amplitude :  A = " << AAA*epsilonTT  << endl;
+cout << "  >>  In terms of Energy = " << AAA*sqrt(2*int2d(th)(abs(u1x)^2+abs(u1y)^2))*epsilonTT << endl;
+cout << "  >>  In terms of Lift force : Fy = [" << AAA*FyA1*epsilonTT << " exp(i omega0 t) + c.c. ]" << endl;
+cout << "                             : Fy = " << real(AAA*FyA1)*2*epsilonTT << " cos(omega0 t) + " 
+													 << -imag(AAA*FyA1)*2*epsilonTT << " sin(omega0 t) " << endl; 
+
+cout << endl << "  >> Drag force   = " << Fx0+(Fxeps2 + FxA20*AAA^2)*epsilonTT^2 << " + [ " 
+										 << real(FxA20*2)*epsilonTT^2 << " * cos(2 omega0 t ) + " 
+			                             << -imag(FxA22*2)*epsilonTT^2 << " * sin(2 omega0 t ) "   << endl;
+
+omegaNL = omegaC+(imag(Lambda) - imag(Nu0+Nu2)*AAA^2)*epsilonTT^2;
+			                             
+cout << endl << "  >> Frequency = " << omegaC <<  " + " << (imag(Lambda) - imag(Nu0+Nu2)*AAA^2)*epsilonTT^2  
+						<<  "  =  " << omegaNL << endl ;
+						
+cout << endl << "########################################################" << endl << endl;
+  	
+};
+
+
+//// GENERATE FILE WITH ALL COEFFS ; USEFUL FOR MATLAB DRIVER
+
+	
+{
+ 		 ofstream file(ffdatadir+"WNL_results.ff2m");
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Coefficients of the Amplitude Equation obtained by Weakly Non Linear analysis" << endl;
+    	 file << "datatype WNL" << endl;
+	     file << "real Rec complex eigenvalue complex lambdaEps complex c11Eps1 ";
+	     file << "complex c12Eps1 complex lambdaEps2 complex c1Eps2 complex c2Eps2" << endl << endl ; 
+	     file << ReC << endl 
+			  << 0 << endl << omegaC  << endl 
+			  << real(Lambda) << endl << imag(Lambda) << endl 
+			  << real(Nu0) << endl << imag(Nu0) << endl 
+			  << real(Nu2) << endl << imag(Nu2) <<  endl 
+			  << real(LambdaEps2) << endl << imag(LambdaEps2)  << endl
+			  << real(c1Eps2) << endl << imag(c1Eps2) << endl
+			  << real(c2Eps2) << endl << imag(c2Eps2) << endl
+			  <<  endl <<  endl;
+
+};
+
+
+
+//////// GENERATE "GUESS FILES" for Self-consistent computation -> OBSOLETE ?
+if(Recheck>0)
+{
+XXMh [umx,umy,ump]; // mean flow
+Re = Recheck;
+
+{
+	ofstream file(ffdatadir+"MeanFlow_guess.txt");
+		umx[] = ubx[]+epsilonTT^2*uepsx[];
+	[umx,umy,ump]=[umx,umy,ump]+AAA^2*epsilonTT^2*[real(u20x),real(u20y),real(u20p)];
+	file << umx[]; 
+	file << endl << endl << Re;
+}; 
+SFWriteBaseFlow(ffdatadir+"MeanFlow_guess.ff2m",um,"MeanFlow",1);
+
+
+
+    [u1x,u1y,u1p] = 2*AAA*epsilonTT*[u1x,u1y,u1p]; // factor 2 because (cos, sin) components instead of (re,im)
+{
+ 	ofstream file(ffdatadir+"HBMode1_guess.txt");
+   	file << u1x[] ;	
+   	file << endl << endl << 0 << endl << omegaC  << endl;
+};
+SFWriteMode(ffdatadir+"HBMode1_guess.ff2m",u1,1i*omegaNL,1i*omegaC,"HarmonicMode",1);
+
+	cout << 2*AAA^2*epsilonTT^2 << endl;
+	u22x[] = 2*AAA^2*epsilonTT^2*u22x[]; // factor 2 because (cos, sin) components instead of (re,im)
+{
+ 	ofstream file(ffdatadir+"HBMode2_guess.txt");
+   	file << u22x[] ;	
+   	file <<  endl << 0 << endl << 2*omegaC  << endl;
+};
+
+SFWriteMode(ffdatadir+"HBMode2_guess.ff2m",u22,2i*omegaNL,2i*omegaC,"SecondHarmonicMode",1);
+
+};
+
+	
+	
+	

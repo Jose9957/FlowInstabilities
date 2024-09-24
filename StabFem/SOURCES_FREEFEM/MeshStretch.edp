@@ -1,0 +1,163 @@
+
+
+// README :
+// This little program is used to stretch the mesh in both X and Y directions
+
+// WARNING : should be merged with SplitMesh
+
+verbosity = 0;
+
+
+
+////////////////////////////////////////////////////////////////
+//
+// MAILLAGE ET GEOMETRIE INITIAUX
+//
+////////////////////////////////////////////////////////////////
+
+//include "SF_Geom.edp";
+include "StabFem.idp";
+
+mesh th=readmesh(ffdatadir+"mesh_guess.msh");
+
+mesh thold = th;
+
+IFMACRO(FREESURFACE,YES)
+string typestart = "pined";
+string typeend = "pined";
+mesh thsurface;
+if(typesurfacemesh=="plain") 
+{
+thsurface = th; 	// Maillage 'surface'
+};
+if(typesurfacemesh=="empty") 
+{
+thsurface = emptymesh(th); 	// Maillage 'surface'
+};
+include "Macros_Geometry_FreeSurface.idp";
+ENDIFMACRO
+
+cout << "Stretching mesh :" << endl;
+
+real OldVolume = int2d(th)(x);
+//real xmin = th.xmin; real xmax = th.xmax; real ymin = th.ymin; real xmax = th.ymax; 
+
+cout << "Reading mesh : Initial Volume = " << OldVolume << endl ;
+//cout << "               Initial Xmin, Xmax = " << xmin << " ; " << xmax << endl;
+//cout << "               Initial Ymin, Ymax = " << ymin << " ; " << ymax << endl;
+  
+//string stretchingtype ;
+//cout << ">>  Enter stretching type ?  (xy, outerx, outery, ...)  > " ;
+//cin >> stretchingtype ;
+//cout << stretchingtype  << endl;
+
+real Xfactor,Yfactor,xminstretch,yminstretch;
+
+//if(stretchingtype=="xy")
+//	{
+	cout << "$$ Parameters for xy stretching :" << endl;
+	cout << " Enter Stretching ratio in X direction > ";
+	cin >> Xfactor;
+	cout << " >>> Xfactor = " << Xfactor << endl;
+	cout << " Enter Stretching ratio in Y direction > ";
+	cin >> Yfactor;
+	cout << " >>> Yfactor = " << Yfactor << endl;
+	cout << " Enter xminstretch (apply strething only |x|  >  xminstretch) : ";
+	cin >> xminstretch;
+	cout << " >>> xminstretch = " << xminstretch << endl;
+	cout << " Enter yminstretch (apply strething only |x|  >  xminstretch) : ";
+	cin >> yminstretch;
+	cout << " >>> yminstretch = " << yminstretch << endl;
+//	}
+//	else if(stretchingtype=="outery")
+
+
+macro stretchx(x)
+(x<xminstretch)?(x):(xminstretch+(x-xminstretch)*Xfactor)
+//
+
+macro stretchy(y)
+(y<yminstretch)?(y):(yminstretch+(y-yminstretch)*Yfactor)
+//
+
+
+// Deplacement du maillage
+th = movemesh(th,[stretchx(x),stretchy(y)]);
+
+IFMACRO(FREEFEMPLOTS,YES)
+plot(th,thold,cmm="Deformation maillage ",wait=1);
+//ENDIFMACRO
+
+real NewVolume = int2d(th)(x);
+cout << "NewVolume = " << NewVolume << endl; 
+
+IFMACRO(FREESURFACE,YES)
+if(typesurfacemesh=="plain") 
+{
+thsurface = th; 	// Maillage 'surface'
+};
+if(typesurfacemesh=="empty") 
+{
+thsurface = emptymesh(th); 	// Maillage 'surface'
+};
+SurfaceNumbering(IndexPointSurf,xPointSurf,yPointSurf,S0PointSurf,Nsurface);
+CalcGeomSurf;
+real Zmin = yPointSurf(0);
+real Zmax = yPointSurf(Nsurface);
+real L = Zmax-Zmin;
+real Rl = max(xPointSurf(0),xPointSurf(Nsurface));
+cout << "Geometry After MeshStretch : L = " << L << " ; R = " << Rl << endl << endl;
+ENDIFMACRO
+
+savemesh(th,ffdatadir+"mesh_stretched.msh");
+
+IFMACRO(SFWriteMesh)
+	SFWriteMesh(ffdatadir+"mesh_stretched.ff2m",th,"stretched");
+ENDIFMACRO
+
+IFMACRO(SFWriteConnectivity)
+	SFWriteConnectivity(ffdatadir+"mesh_stretched_connectivity.ff2m",th);
+ENDIFMACRO
+
+//IFMACRO(SFWriteMeshSurface)
+//	SFWriteMeshSurface(ffdatadir+"mesh_stretched_surface.ff2m",th);
+//ENDIFMACRO
+
+IFMACRO(FREESURFACE,YES)
+	real gamma; real GAMMABAR; real dpdz;
+	{				
+		ifstream file(ffdatadir+"FreeSurface.txt");
+	    file >> gamma >> dpdz >> GAMMABAR;
+	}
+	real PP0 = 1;
+	SFWriteSurface(ffdatadir+"FreeSurface_stretch.ff2m",th);
+	{				
+		ofstream file(ffdatadir+"FreeSurface_stretch.txt");
+	    file << gamma << endl << dpdz << endl << GAMMABAR << endl;
+	}
+	SFWriteMeshSurface(ffdatadir+"mesh_stretched_surface.ff2m",th);
+ENDIFMACRO
+
+IFMACRO(LINEICMESH,1)
+  include "Macros_Lineic.idp"
+  int[int] lab = [7];
+  meshL thlin = extract(th,refedge = lab);
+  fespace Vhlin(thlin,P1);
+  Vhlin xsurf,ysurf,S0,N0x,N0y,K0a,K0b,alphasurf;
+  CalcGeomLin(thlin,xsurf,ysurf,S0,alphasurf,N0x,N0y,K0a,K0b,th,7)
+  SFWriteMeshLin(ffdatadir+"mesh_adapt_line.ff2m",Thlin,xsurf,ysurf,S0,N0x,N0y,K0a,K0b)
+  real PP0 = 1;
+  real gamma; real GAMMABAR; real dpdz;
+	{				
+		ifstream file(ffdatadir+"FreeSurface.txt");
+	    file >> gamma >> dpdz >> GAMMABAR;
+	}
+    {				
+		ofstream file(ffdatadir+"FreeSurface_stretch.txt");
+	    file << gamma << endl << dpdz << endl << GAMMABAR << endl;
+	}
+    SFWriteSurface(ffdatadir+"FreeSurface_stretch.ff2m",th);
+ENDIFMACRO
+
+
+cout << endl << "The end..." << endl << endl;

@@ -1,0 +1,730 @@
+//
+//  PROGRAM Sensitivity2D_Comp.edp
+//	
+//	Performs linear sensitivity analysis of a 2D compressible subsonic flow
+//   
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re, Ma
+//
+//  
+//
+//	INPUT FILES :
+//		BaseFlow.txt	-> base flow 
+// 		mesh.msh 		-> mesh in Freefem format
+//      EigenmodeDS.txt -> Direct eigenmode
+//      EigenmodeAS.txt -> Adjoint eigenmode
+//  OUTPUT FILES :
+//
+//  	Eigenmode##.txt   (txt format for FreeFem)
+//      Eigenmode##.ff2m  (ff2m format for stabfem)
+//
+// in all modes :
+//		Spectrum.txt -> All computed Eigenvalues
+//
+// 	ERROR MANAGEMENT : 
+//      if Arnoldi method fails, TODO: Not handled yet
+//
+// Created in October 2019. J.S.
+
+ 
+include "SF_Geom.edp";
+include "StabFem.idp";
+include "Param_Mapping.edp"; // No CM
+
+macro trueRestrict()true// EOM ??????
+macro removeZeros()true// EOM.  ???????
+
+
+macro def(i) [i,i2,i3,i4,i5]// EOM                         // vector field definition
+macro init(i)[i,i2,i3,i4,i5]// EOM                        // vector field initialization
+macro defS(i) i// EOM                         // scalar field definition
+macro initS(i) i// EOM                        // scalar field initialization
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 1 : parameters		
+//
+
+/////////////////////////////////////////////////////////////
+// Physical parameters
+real gamma=1.4; 
+real Pr=0.7;
+func Pk = [P2,P2,P1,P1,P1];  // finite element space for PETSc
+real Re,Reans,Ma,Maans,Omegax,Omegaxans;
+real ReM, MaM, sigmaM, omegaM;
+real nu;
+complex lambda; // Eigenvalue
+real k; // Spanwise wavenumber
+string symmetry, symmetryBaseFlow;
+string mode;
+
+// INPUT  
+cout << " Enter Reynolds :   " << endl; cin  >> Re;	nu=1.0/Re;
+cout << " Enter Mach :   " << endl; cin  >> Ma;
+cout << " Enter the mode (S - Structural Sensitivity) :   " << endl; cin  >> mode;
+cout << " Enter the symmetry of the baseflow :   " << endl; cin  >> symmetryBaseFlow;
+cout << " Enter the symmetry of the direct mode :   " << endl; cin  >> symmetry;
+cout << " Enter spanwise wavenumber (k) " << endl; cin  >> k;
+
+// OUTPUT
+cout << " ### PARAMETERS SELECTED : " << endl;
+cout << " Re = " << Re << endl;
+cout << " Ma = " << Ma << endl;
+cout << " Mode = " << mode << endl;
+cout << " Spanwise wavenumber k = " << k << endl;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 2 : read files		
+//  
+
+/////////////////////MESH//////////////////////////////////////////
+mesh th;
+int[int][int] intersection;   // local-to-neighbors renumbering
+real[int] D;                  // partition of unity
+
+if(mpirank==0) th=readmesh(ffdatadir+"mesh.msh"); // global mesh read on rank 0
+///////////////////////////////////////////////////////////////////
+
+/////////////////////FE-SPACE//////////////////////////////////////////
+fespace XXxxxH(th,[P2,P2,P1,P1,P1]); ///
+fespace XXXxxxH(th,[P2,P2,P2,P1,P1,P1]); /// 
+fespace XXX(th,[P2,P2,P2]); 
+fespace XX(th,[P2,P2]); 
+fespace XH(th,P2);             ////// f.e. space for vel.
+fespace xh(th,P1);            ////// f.e. space for pressure
+
+//////////////////////////// Def vector fields ///////////////////////////  
+macro defU(u,p,T,rho)[u#x,u#y,p,T,rho]//EOF
+macro defU3D(u,p,T,rho)[u#x,u#y,u#z,p,T,rho]//EOF
+//////////////////////////////////////////////////////////////////////////
+/////////////////// BASEFLOW /////////////////////////////////////////////
+XXxxxH defU(Ub,Pb,Tb,Rhob);
+XXXxxxH defU3D(U3Db,P3Db,T3Db,Rho3Db);
+//////////////////////////////////////////////////////////////////////////
+/////////////////// EIGENMODES ///////////////////////////////////////////
+XXxxxH<complex> defU(u2D1,u2D1p,u2D1T,u2D1rho);
+XXxxxH<complex> defU(u2D1A,u2D1Ap,u2D1AT,u2D1Arho);
+XXXxxxH<complex> defU3D(u1,u1p,u1T,u1rho);
+XXXxxxH<complex> defU3D(u1A,u1Ap,u1AT,u1Arho);
+/////////////////// BASEFLOW /////////////////////////////////////////////
+
+
+//////////////////////////// INITIAL CONDITIONS ///////////////////////////////
+int testCB;
+SFcheckfile("BaseFlow.txt",testCB);
+if (testCB>0)
+{
+    ifstream fileGuess(ffdatadir + "BaseFlow.txt");
+    fileGuess >> Ubx[];
+    fileGuess >> Reans;
+	fileGuess >> Maans;
+	fileGuess >> Omegaxans;
+	if(mpirank==0) cout << "$$ Re of guess field : " << Reans << endl; 
+	if(mpirank==0) cout << "$$ Ma of guess field : " << Maans << endl; 
+	if(mpirank==0) cout << "$$ Omegax of guess field : " << Omegaxans << endl; 
+	[Ubx,Uby,Pb,Tb,Rhob] = [Ubx,Uby,1 + gamma*Ma^2*Pb,Tb,Rhob]; // Redefinition cause we use Pb = Pt = 1 + gamma*Ma^2*Ph
+	defU3D(U3Db,P3Db,T3Db,Rho3Db) = [Ubx,Uby,0,Pb,Tb,Rhob];
+}
+else
+{
+	cout << "$$ Baseflow, BaseFlow.txt is not in the workdir directory." << endl;
+	cout << "$$ Leaving FreeFem++ with error code 210" << endl; // TODO: Verify that the error is 210 in the whole file
+	exit(210);
+}
+/////////////////// Generate and split mesh ///////////////////
+broadcast(processor(0, mpiCommWorld), th);     // global mesh broadcasted to all ranks
+build(th, 1, intersection, D, Pk, mpiCommWorld) // split mesh and distribute it to each rank
+//////////////////////////////////////////////////////////////
+
+////////////////////// READING DIRECT MODE ////////////////////////////////////////
+SFcheckfile("EigenmodeDS.txt",testCB);
+if (testCB>0)
+{
+	cout << "$$ --- Starting  from mode in file EigenmodeDS.txt --- $$" << endl;
+	ifstream cbin(ffdatadir+"EigenmodeDS.txt");
+	if(k == 0)
+	{
+		cbin >> u2D1x[] >> ReM >> MaM >> sigmaM >> omegaM;
+		defU3D(u1,u1p,u1T,u1rho) = [u2D1x,u2D1y,0,u2D1p,u2D1T,u2D1rho];
+	}
+	else cbin >> u1x[] >> ReM >> MaM >> sigmaM >> omegaM; 
+	cout << " omega of the starting field = " << omegaM<< endl;
+}
+else
+{
+	cout << "$$ Direct eigenmode, EigenmodeDS.txt is not in the workdir directory." << endl;
+	cout << "$$ Leaving FreeFem++ with error code 210" << endl;
+	exit(210);
+}
+////////////////////////////////////////////////////////////////////////////////////
+
+////////////////////// READING ADJOINT MODE ////////////////////////////////////////
+SFcheckfile("EigenmodeAS.txt",testCB);
+if (testCB>0)
+{
+	cout << "$$ --- Starting  from mode in file EigenmodeAS.txt --- $$" << endl;
+	ifstream cbin(ffdatadir+"EigenmodeAS.txt");
+	if(k == 0)
+	{
+		cbin >> u2D1Ax[];
+		defU3D(u1A,u1Ap,u1AT,u1Arho) = [u2D1Ax,u2D1Ay,0,u2D1Ap,u2D1AT,u2D1Arho];
+	}
+	else cbin >> u1Ax[]; 
+}
+else
+{
+	cout << "$$ Direct eigenmode, EigenmodeDS.txt is not in the workdir directory." << endl;
+	cout << "$$ Leaving FreeFem++ with error code 210" << endl;
+	exit(210);
+}
+////////////////////////////////////////////////////////////////////////////////////
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 3 : Solver macros 	
+//
+//
+
+//////////////////////////// COMPLEX MAPPING //////////////////////////////////////////////////
+IFMACRO(!dX)
+macro dX(a) dx(a) //EOM
+macro dY(a) dy(a) //EOM
+macro JJ   1. //EOM
+ENDIFMACRO
+///////////////////////////////////////////////////////////////////////////////////////////////
+///////////////////////////// CHANGE MACROS IN CYLINDRICAL COORDINATES ////////////////////////
+///////////////////////////////////////////////////////////////////////////////////////////////
+macro div(u) ((dx(u#x)+dy(u#y)))//EOM
+macro ugradf(u,f) ((u#x*dx(f)+u#y*dy(f)))//EOM
+macro termnonlinear(u,v,w) ((w#x*(u#x*dx(v#x)+u#y*dy(v#x))+w#y*(u#x*dx(v#y)+u#y*dy(v#y))))//EOM
+macro Grad(u) [[dx(u#x),dx(u#y)],[dy(u#x),dy(u#y)]]//EOM
+macro Strain(u)[[dx(u#x),0.5*(dx(u#y)+dy(u#x))],[0.5*(dx(u#y)+dy(u#x)),dy(u#y)]]//EOM
+macro gradgrad(u,v)(dx(u)*dx(v)+dy(u)*dy(v))//EOM
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+macro comp3D(u) [u#x,u#y,u#z]//EOM
+
+macro JacPhys() 1.0//EOM. In cylindrical coordinates this is the radius. Usually y
+
+macro div3D(ik,u) (dx(u#x)+dy(u#y)+ik*u#z)//EOM
+
+macro Grad3D(ik,u) [
+			[dx(u#x), dx(u#y),  dx(u#z)], 
+			[dy(u#x), dy(u#y),  dy(u#z)],
+			[ik*u#x,  ik*u#y,  ik*u#z  ]
+			]//EOM
+
+macro gradScal3D(ik,u) ([dx(u), dy(u), ik*u])//EOM
+
+macro Strain3D(ik,u) [	
+				[dx(u#x), 				.5*(dx(u#y)+dy(u#x)),  .5*(ik*u#x+dx(u#z)) ], 
+				[.5*(dx(u#y)+dy(u#x)), 	dy(u#y),				.5*(ik*u#y+dy(u#z))],
+				[.5*(ik*u#x+dx(u#z)),  .5*(ik*u#y+dy(u#z)), ik*u#z]
+				]// EOM
+
+macro ugradf3D(ik,u,f) ((u#x*dx(f)+u#y*dy(f) + ik*u#z*f ))//EOM
+
+macro termnonlinear3D(ik,u,v,w) ((w#x*(u#x*dx(v#x)+u#y*dy(v#x)+ik*u#z*v#x)+w#y*(u#x*dx(v#y)+u#y*dy(v#y)+ik*u#z*v#y)
+							 +w#z*(u#x*dx(v#z)+u#y*dy(v#z)+ik*u#z*v#z)))//EOM
+
+macro gradgrad3D(iku,ikv,u,v)(dx(u)*dx(v)+dy(u)*dy(v) + iku*ikv*u*v)//EOM
+
+macro convection3D(ik,u,v) ([ u#x*dx(v#x) + u#y*dy(v#x) + ik*u#z*v#x,
+							  u#x*dx(v#y) + u#y*dy(v#y) + ik*u#z*v#y,
+							  u#x*dx(v#z) + u#y*dy(v#z) + ik*u#z*v#z])//EOM
+
+macro gradTVec3D(ik,u,v) (Grad3D(ik,v)*comp3D(u))//EOM
+
+macro laplace3D(ik,u) (dxx(u) + dyy(u) + ik*ik*u ) //EOM
+macro gradDivVec3D(ik,u) ([dxx(u#x) + dxy(u#y) + ik*dx(u#z),
+						   dxy(u#x) + dyy(u#y) + ik*dy(u#z),
+						   ik*dx(u#x) + ik*dy(u#y) + ik*ik*u#z])//EOM
+
+macro divTau3D(ik,u) ([laplace3D(ik,u#x),  laplace3D(ik,u#y), laplace3D(ik,u#z)  ]
+					   + 1.0/3.0*gradDivVec3D(ik,u) ) // EOM
+
+macro SmAdjqAdjCONT(ik,uDC,uA)( -ugradf3D(-ik,uDC,uA#rho) + termnonlinear3D(0,uDC,U3Db,uA) + termnonlinear3D(-ik,U3Db,uDC,uA) 
+			                 + uA#T*ugradf3D(0,uDC,T3Db) + uA#T*ugradf3D(-ik,U3Db,uDC#T) - uA#p*uDC#T )//EOM
+
+macro SmAdjqAdjMOM(ik,lamC,uDC,uA)( Rho3Db*gradTVec3D(-ik,uA,uDC) - Rho3Db*convection3D(-ik,uDC,uA) 
+									+ uDC#rho*gradTVec3D(0,uA,U3Db) - uDC#rho*convection3D(-ik,U3Db,uA) 
+									- uDC#rho*gradScal3D(-ik,uA#rho) + uA#T*(uDC#rho*gradScal3D(0,T3Db) 
+							   		+ Rho3Db*gradScal3D(-ik,uDC#T)) 
+							    	- (gamma-1)*(uA#T*gradScal3D(-ik,uDC#p) + uDC#p*gradScal3D(-ik,uA#T)) 
+							    	+ 2.0*gamma*(gamma-1)*Ma^2/Re*(uA#T*divTau3D(-ik,uDC) 
+							   		+ 2.0*Strain3D(-ik,uDC)*gradScal3D(-ik,uA#T) - 2.0/3.0*gradScal3D(-ik,uA#T)*div3D(-ik,uDC) )
+							   		+ [uA#x,uA#y,uA#z]*( lamC*uDC#rho )
+							   )//EOM
+
+macro SmAdjqAdjENER(ik,uDC,uA) ( - uDC#rho*ugradf3D(-ik,U3Db,uA#T) - uDC#rho*uA#T*div3D(0,U3Db)
+								 - uA#T*ugradf3D(-ik,U3Db,uDC#rho) - Rho3Db*ugradf3D(-ik,uDC,uA#T)
+								 - uA#T*ugradf3D(0,uDC,Rho3Db) - Rho3Db*uA#T*div3D(-ik,uDC)
+								 - uA#p*uDC#rho
+								)//EOM
+
+macro SmAdjqAdjSTATE(ik,uDC,uA) ( (gamma-1)*uA#T*div3D(-ik,uDC)  )//EOM
+
+
+macro SmAdjqAdjCONTAdv(ik,uDC,uA)( termnonlinear3D(-ik,U3Db,uDC,uA) +  uA#T*ugradf3D(-ik,U3Db,uDC#T) )//EOM
+
+macro SmAdjqAdjMOMAdv(ik,lamC,uDC,uA)( Rho3Db*gradTVec3D(-ik,uA,uDC) - uDC#rho*gradScal3D(-ik,uA#rho)
+										+ uDC#rho*gradTVec3D(0,uA,U3Db) - uDC#rho*convection3D(-ik,U3Db,uA) 
+										+ uA#T*(uDC#rho*gradScal3D(0,T3Db) + Rho3Db*gradScal3D(-ik,uDC#T)) 
+							   		)//EOM
+
+macro SmAdjqAdjENERAdv(ik,uDC,uA) ( - uDC#rho*ugradf3D(-ik,U3Db,uA#T) - uDC#rho*uA#T*div3D(0,U3Db)
+									 - uA#T*ugradf3D(-ik,U3Db,uDC#rho)
+									)//EOM
+
+macro AmVarMaMOMEMTUM(ik,uD) (  -2.0/(gamma*Ma^3)*gradScal3D(ik,uD#p) ) // EOM
+macro AmVarMaENERGY(ik,uD,U) ( -2.0*gamma*(gamma-1.0)*Ma/Re*(2.0*((Strain3D(1i*k,uD):Strain3D(0,U))
+							   +(Strain3D(0,U):Strain3D(ik,uD)))-2.0/3.0*(2.0*div3D(0,U)*div3D(ik,uD))) ) // EOM
+
+macro lambDUwall(rho0,u0A,N) ( [ rho0*u0A#rho*N#x, rho0*u0A#rho*N#y] + 1.0/Re*(2.0*Strain(u0A)*[N#x,N#y] - 2.0/3.0*div(u0A)*[N#x,N#y]) )//EOM
+macro lambDTwall(u0A,N) ( gamma/(Pr*Re)*(ugradf(N,u0A#T))  )//EOM
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 4 : Customizable macros 	
+//
+//
+
+IFMACRO(!BoundaryconditionsStability)
+macro BoundaryconditionsStability(du,us,dp,dT,drho,symmetry)
+	           on(1,dux#=0,du#y=0.0,dT=0.0,drho=0.0)
+	         + on(3,dux#=0,du#y=0.0,dT=0.0,drho=0.0)
+             + on(2,du#x=0.0,du#y=0.0)
+             + int1d(th,6)(du#x*us#x*1e30*(symmetry=="A")+du#y*us#y*1e30*(symmetry=="S"))
+//EOM
+ENDIFMACRO
+
+IFMACRO(!BoundaryconditionsStabilityMode3D)
+macro BoundaryconditionsStabilityMode3D(du,us,dp,dT,drho,symmetry)
+	           on(1,dux#=0,du#y=0.0,du#z=0.0,dT=0.0,drho=0.0)
+	         + on(3,dux#=0,du#y=0.0,du#z=0.0,dT=0.0,drho=0.0)
+             + on(2,du#x=0.0,du#y=0.0,du#z=0.0)
+             + int1d(th,6)((du#x*us#x+us#z*du#z)*1e30*(symmetry=="A")+du#y*us#y*1e30*(symmetry=="S"))
+//EOM
+ENDIFMACRO
+
+IFMACRO(!Uinlet)
+macro Uinlet() 1. //EOM
+ENDIFMACRO	
+
+IFMACRO(!Vinlet)
+macro Vinlet() 0. //EOM
+ENDIFMACRO	
+
+IFMACRO(!BoundaryconditionsBaseFlow)
+macro BoundaryconditionsBaseFlow(du,dp,dT,drho)
+	           on(1,du#x=Uinlet(y)-Ubx,du#y=Vinlet(y)-Uby,drho=1.-Rhob,dT=1.-Tb)
+	         + on(3,du#x=Uinlet(y)-Ubx,du#y=0.0-Uby,drho=1.-Rhob,dT=1.-Tb)  
+             + on(2,du#x=0.0-Ubx,du#y=0.0-Uby)
+             + int1d(th,6)(du#x*us#x*1e30*(symmetryBaseFlow=="A")+du#y*us#y*1e30*(symmetryBaseFlow=="S"))       
+//EOM
+ENDIFMACRO
+
+XH INNERREG=JacPhys*InnerReg(); // Physical Domain. CM layer not considered.
+
+IFMACRO(!SFAbsBNorm)
+	macro SFAbsBNorm(u,Rho) 
+	(
+		sqrt(abs(Rho*u#x)^2+abs(Rho*u#y)^2+abs(u#rho)^2+abs(Rho*u#T)^2)
+	) // EOM
+ENDIFMACRO
+
+IFMACRO(!SFBInnerProd)
+	macro SFBInnerProd(uA,uB,Rho) 
+	(
+		Rho*conj(uA#x)*uB#x+Rho*conj(uA#y)*uB#y+Rho*conj(uA#T)*uB#T+conj(uA#rho)*uB#rho
+	) // EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFAbsBNorm3D)
+	macro SFAbsBNorm3D(u,Rho) 
+	(
+		sqrt(abs(Rho*u#x)^2+abs(Rho*u#y)^2+abs(Rho*u#z)^2+abs(u#rho)^2+abs(Rho*u#T)^2)
+	) // EOM
+ENDIFMACRO
+
+IFMACRO(!SFBInnerProd3D)
+	macro SFBInnerProd3D(uA,uB,Rho) 
+	(
+		Rho*conj(uA#x)*uB#x+Rho*conj(uA#y)*uB#y+Rho*conj(uA#z)*uB#z+Rho*conj(uA#T)*uB#T+conj(uA#rho)*uB#rho
+	) // EOM
+ENDIFMACRO
+
+IFMACRO(!SFBInnerProdDom3D)
+	macro SFBInnerProdDom3D(uA,uB,Rho) 
+	(
+		intN(th)(INNERREG*(Rho*conj(uA#x)*uB#x+Rho*conj(uA#y)*uB#y+Rho*conj(uA#z)*uB#z+Rho*conj(uA#T)*uB#T+conj(uA#rho)*uB#rho))
+	) // EOM
+ENDIFMACRO
+
+IFMACRO(!SFBInnerProdTotDom3D)
+	macro SFBInnerProdTotDom3D(uA,uB) 
+	(
+		intN(th)(INNERREG*(conj(uA#x)*uB#x+conj(uA#y)*uB#y+conj(uA#z)*uB#z+conj(uA#T)*uB#T+conj(uA#rho)*uB#rho+conj(uA#p)*uB#p))
+	) // EOM
+ENDIFMACRO
+
+IFMACRO(!SFWriteStructSen)
+macro SFWriteStructSen(namefile,sSen,sEndo)
+		 {
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1); 
+   		 p1forff2m<complex> stEndo;
+   		 stEndo = sEndo;
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Structural sensitivity of a 2D-compressible problem " << endl;
+    	 file << "datatype sensitivity datastoragemode ReP2 datadescriptors structSen" << endl;
+    	 string descriptionFF="real* Re real* Ma complex* eigenvalue P1c structEndo"; 
+    	 file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << Ma << endl << sigmaM << endl << omegaM << endl << endl;
+		 for (int j=0;j<stEndo[].n ; j++) file << real(stEndo[][j]) << endl << imag(stEndo[][j]) << endl;
+		};
+//EOM
+ENDIFMACRO	
+
+
+IFMACRO(!SFWriteMaSen)
+macro SFWriteMaSen(namefile,lTDu0,lDu0,lDu0Adv,uDMa,dlambda)
+		 {
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1); 
+   		 p1forff2m xx,yy;
+		 xx=x;
+		 yy=y;
+		 p1forff2m<complex> utTDu0,vtTDu0,wtTDu0,ptTDu0,rhotTDu0,TtTDu0;
+	     p1forff2m<complex> utDu0,vtDu0,wtDu0,ptDu0,rhotDu0,TtDu0;
+	     p1forff2m<complex> utDu0Adv,vtDu0Adv,wtDu0Adv,ptDu0Adv,rhotDu0Adv,TtDu0Adv;
+	     p1forff2m<complex> utDMa,vtDMa,wtDMa,ptDMa,rhotDMa,TtDMa;
+	     utTDu0=lTDu0#x; vtTDu0=lTDu0#y; wtTDu0=lTDu0#z; ptTDu0=lTDu0#p; rhotTDu0=lTDu0#rho; TtTDu0=lTDu0#T;
+		 utDu0=lDu0#x; vtDu0=lDu0#y; wtDu0=lDu0#z; ptDu0=lDu0#p; rhotDu0=lDu0#rho; TtDu0=lDu0#T;
+		 utDu0Adv=lDu0Adv#x; vtDu0Adv=lDu0Adv#y; wtDu0Adv=lDu0Adv#z; ptDu0Adv=lDu0Adv#p; rhotDu0Adv=lDu0Adv#rho; TtDu0Adv=lDu0Adv#T;
+		 utDMa=uDMa#x; vtDMa=uDMa#y; wtDMa=uDMa#z; ptDMa=uDMa#p; rhotDMa=uDMa#rho; TtDMa=uDMa#T;
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Sensitivity to Mach number of a 2D-compressible problem " << endl;
+		 file << "datatype " << "Sensitivity" <<" datastoragemode CxP2P2P2P1P1P1 " << endl;
+    	 string descriptionFF="real* Re real* Ma complex* eigenvalue " + 
+    	 						"P1c lamDu0 P1c lamDv0 P1c lamDw0 P1c lamDp0 P1c lamDrho0 P1c lamDT0 " + 
+    	 						"P1c lamSmDu0 P1c lamSmDv0 P1c lamSmDw0 P1c lamSmDp0 P1c lamSmDrho0 P1c lamSmDT0 " + 
+    	 						"P1c lamSmDu0Adv P1c lamSmDv0Adv P1c lamSmDw0Adv P1c lamSmDp0Adv P1c lamSmDrho0Adv P1c lamSmDT0Adv " +
+    	 						"P1c utDMa P1c vtDMa P1c wtDMa P1c ptDMa P1c rhotDMa P1c TtDMa " + 
+    	 						"complex dlamdMa complex dlamdMau0const complex dlamdMaMaconst complex dlamdMaMaconstAdv "; 
+
+    	 file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << Ma << endl << sigmaM << endl << omegaM << endl << endl;
+		 for (int j=0;j<utTDu0[].n ; j++) file << real(utTDu0[][j]) << endl << imag(utTDu0[][j]) << endl;
+		 for (int j=0;j<vtTDu0[].n ; j++) file << real(vtTDu0[][j]) << endl << imag(vtTDu0[][j]) << endl;
+		 for (int j=0;j<wtTDu0[].n ; j++) file << real(wtTDu0[][j]) << endl << imag(wtTDu0[][j]) << endl;
+		 for (int j=0;j<ptTDu0[].n ; j++) file << real(ptTDu0[][j]) << endl << imag(ptTDu0[][j]) << endl;
+		 for (int j=0;j<rhotTDu0[].n ; j++) file << real(rhotTDu0[][j]) << endl << imag(rhotTDu0[][j]) << endl;
+		 for (int j=0;j<TtTDu0[].n ; j++) file << real(TtTDu0[][j]) << endl << imag(TtTDu0[][j]) << endl;
+
+		 for (int j=0;j<utDu0[].n ; j++) file << real(utDu0[][j]) << endl << imag(utDu0[][j]) << endl;
+		 for (int j=0;j<vtDu0[].n ; j++) file << real(vtDu0[][j]) << endl << imag(vtDu0[][j]) << endl;
+		 for (int j=0;j<wtDu0[].n ; j++) file << real(wtDu0[][j]) << endl << imag(wtDu0[][j]) << endl;
+		 for (int j=0;j<ptDu0[].n ; j++) file << real(ptDu0[][j]) << endl << imag(ptDu0[][j]) << endl;
+		 for (int j=0;j<rhotDu0[].n ; j++) file << real(rhotDu0[][j]) << endl << imag(rhotDu0[][j]) << endl;
+		 for (int j=0;j<TtDu0[].n ; j++) file << real(TtDu0[][j]) << endl << imag(TtDu0[][j]) << endl;
+
+		 for (int j=0;j<utDu0Adv[].n ; j++) file << real(utDu0Adv[][j]) << endl << imag(utDu0Adv[][j]) << endl;
+		 for (int j=0;j<vtDu0Adv[].n ; j++) file << real(vtDu0Adv[][j]) << endl << imag(vtDu0Adv[][j]) << endl;
+		 for (int j=0;j<wtDu0Adv[].n ; j++) file << real(wtDu0Adv[][j]) << endl << imag(wtDu0Adv[][j]) << endl;
+		 for (int j=0;j<ptDu0Adv[].n ; j++) file << real(ptDu0Adv[][j]) << endl << imag(ptDu0Adv[][j]) << endl;
+		 for (int j=0;j<rhotDu0Adv[].n ; j++) file << real(rhotDu0Adv[][j]) << endl << imag(rhotDu0Adv[][j]) << endl;
+		 for (int j=0;j<TtDu0Adv[].n ; j++) file << real(TtDu0Adv[][j]) << endl << imag(TtDu0Adv[][j]) << endl;
+
+		 for (int j=0;j<utDMa[].n ; j++) file << real(utDMa[][j]) << endl << imag(utDMa[][j]) << endl;
+		 for (int j=0;j<vtDMa[].n ; j++) file << real(vtDMa[][j]) << endl << imag(vtDMa[][j]) << endl;
+		 for (int j=0;j<wtDMa[].n ; j++) file << real(wtDMa[][j]) << endl << imag(wtDMa[][j]) << endl;
+		 for (int j=0;j<ptDMa[].n ; j++) file << real(ptDMa[][j]) << endl << imag(ptDMa[][j]) << endl;
+		 for (int j=0;j<rhotDMa[].n ; j++) file << real(rhotDMa[][j]) << endl << imag(rhotDMa[][j]) << endl;
+		 for (int j=0;j<TtDMa[].n ; j++) file << real(TtDMa[][j]) << endl << imag(TtDMa[][j]) << endl;
+		 file << real(dlambda) << endl << imag(dlambda) << endl << real(dlambda#u0const) << endl << imag(dlambda#u0const) << endl <<
+		 real(dlambda#Maconst) << endl << imag(dlambda#Maconst) << endl << real(dlambda#MaconstAdv) << endl << imag(dlambda#MaconstAdv) << endl << endl;
+		};
+//EOM
+ENDIFMACRO	
+
+
+IFMACRO(!SFWritSenForc)
+macro SFWritSenForc(namefile,lTDu0,lDF,lUwall,lDTwall)
+		 {
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1); 
+   		 p1forff2m xx,yy;
+		 xx=x;
+		 yy=y;
+		 p1forff2m<complex> utTDu0,vtTDu0,wtTDu0,ptTDu0,rhotTDu0,TtTDu0;
+	     p1forff2m<complex> utDF,vtDF,ptDF,rhotDF,TtDF;
+	     p1forff2m<complex> lambdaUwall,lambdaVwall;
+	     p1forff2m<complex> lambdaTwall;
+	     utTDu0=lTDu0#x; vtTDu0=lTDu0#y; wtTDu0=lTDu0#z; ptTDu0=lTDu0#p; rhotTDu0=lTDu0#rho; TtTDu0=lTDu0#T;
+		 utDF=lDF#x; vtDF=lDF#y; ptDF=lDF#p; rhotDF=lDF#rho; TtDF=lDF#T;
+		 lambdaUwall=lUwall#x; lambdaVwall=lUwall#y;
+		 lambdaTwall=lDTwall;
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Sensitivity to Mach number of a 2D-compressible problem " << endl;
+		 file << "datatype " << "Sensitivity" <<" datastoragemode CxP2P2P2P1P1P1 " << endl;
+    	 string descriptionFF="real* Re real* Ma complex* eigenvalue " + 
+    	 						"P1c lamDu0 P1c lamDv0 P1c lamDw0 P1c lamDp0 P1c lamDrho0 P1c lamDT0 " + 
+    	 						"P1c utDF P1c vtDF P1c ptDF P1c rhotDF P1c TtDF " + 
+    	 						"P1c lambdaUwall P1c lambdaVwall P1c lambdaTwall "; 
+
+    	 file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << Ma << endl << sigmaM << endl << omegaM << endl << endl;
+		 for (int j=0;j<utTDu0[].n ; j++) file << real(utTDu0[][j]) << endl << imag(utTDu0[][j]) << endl;
+		 for (int j=0;j<vtTDu0[].n ; j++) file << real(vtTDu0[][j]) << endl << imag(vtTDu0[][j]) << endl;
+		 for (int j=0;j<wtTDu0[].n ; j++) file << real(wtTDu0[][j]) << endl << imag(wtTDu0[][j]) << endl;
+		 for (int j=0;j<ptTDu0[].n ; j++) file << real(ptTDu0[][j]) << endl << imag(ptTDu0[][j]) << endl;
+		 for (int j=0;j<rhotTDu0[].n ; j++) file << real(rhotTDu0[][j]) << endl << imag(rhotTDu0[][j]) << endl;
+		 for (int j=0;j<TtTDu0[].n ; j++) file << real(TtTDu0[][j]) << endl << imag(TtTDu0[][j]) << endl;
+
+		 for (int j=0;j<utDF[].n ; j++) file << real(utDF[][j]) << endl << imag(utDF[][j]) << endl;
+		 for (int j=0;j<vtDF[].n ; j++) file << real(vtDF[][j]) << endl << imag(vtDF[][j]) << endl;
+		 for (int j=0;j<ptDF[].n ; j++) file << real(ptDF[][j]) << endl << imag(ptDF[][j]) << endl;
+		 for (int j=0;j<rhotDF[].n ; j++) file << real(rhotDF[][j]) << endl << imag(rhotDF[][j]) << endl;
+		 for (int j=0;j<TtDF[].n ; j++) file << real(TtDF[][j]) << endl << imag(TtDF[][j]) << endl;
+
+		 for (int j=0;j<lambdaUwall[].n ; j++) file << real(lambdaUwall[][j]) << endl << imag(lambdaUwall[][j]) << endl;
+		 for (int j=0;j<lambdaVwall[].n ; j++) file << real(lambdaVwall[][j]) << endl << imag(lambdaVwall[][j]) << endl;
+		 for (int j=0;j<lambdaTwall[].n ; j++) file << real(lambdaTwall[][j]) << endl << imag(lambdaTwall[][j]) << endl;
+		};
+//EOM
+ENDIFMACRO	
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5 : Definition of variational formulations
+//
+
+varf jacobian(defU(du,dp,dT,drho),defU(us,ps,Ts,rhos))=intN(th)
+			  (JacPhys*(
+			  rhos*(drho*div(Ub)+Rhob*div(du)+ugradf(Ub,drho)+ugradf(du,Rhob)) 
+			  //mass equation
+			  -dp/(gamma*Ma^2)*div(us)+2.0/Re*(Strain(du):Grad(us))-2.0/(3.0*Re)*(div(du)*div(us))
+			  +Rhob*termnonlinear(du,Ub,us)+drho*termnonlinear(Ub,Ub,us)+Rhob*termnonlinear(Ub,du,us)
+			  //momentum
+			  +Ts*(drho*ugradf(Ub,Tb)+Rhob*ugradf(Ub,dT)+Rhob*ugradf(du,Tb)
+			     +(gamma-1)*(div(Ub)*dp + div(du)*Pb)
+			     -gamma*(gamma-1.0)*Ma^2/Re*(2.0*((Strain(du):Strain(Ub))+(Strain(Ub):Strain(du)))
+			     -2.0/3.0*(2.0*div(Ub)*div(du))))
+			  +gamma/(Pr*Re)*gradgrad(dT,Ts)
+			  // energy
+			   +ps*(dp-(drho*Tb+Rhob*dT))
+			  ))
+			  +BoundaryconditionsStability(du,us,dp,dT,drho,symmetry);
+
+varf vNSDM(defU(du,dp,dT,drho),defU(us,ps,Ts,rhos))=-intN(th)(
+	  JacPhys*(-2.0*ugradf(us,Pb)/(gamma*Ma^3)
+	  /* momemtum equation */
+	  -Ts*(2*gamma*(gamma-1.0)*Ma/Re*(2.0*((Strain(Ub):Strain(Ub)))-2.0/3.0*(div(Ub)*div(Ub))))
+	  /* energy equation */
+	   ));
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 6 : STRUCTURAL SENSITIVITY
+//    
+
+
+if ( mode == "S")
+{
+	XH<complex> structEndo;
+	XH structSen;
+//////////////////////////// Compute Struct Sen //////////////////////////////////
+	structSen = SFAbsBNorm3D(u1,Rhob)*SFAbsBNorm3D(u1A,Rhob);
+	structSen = structSen/structSen[].max; // Normalization
+	structEndo = SFBInnerProd3D(u1A,u1,Rhob);
+	structEndo = structEndo/structSen[].max; // Normalization
+
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////// Post-Processing //////////////////////////////////////
+
+	string namefile=ffdatadir+"StructSen";
+	ofstream fileMode(namefile+".txt");
+	fileMode.precision(16);
+	fileMode.scientific;
+	fileMode << structSen[]; 
+	fileMode << endl << endl << Re << endl << Ma << endl << endl << sigmaM << "   " << omegaM  << endl;
+	cout << "Writing strutrctural sensitivity in file " << namefile << endl;
+	SFWriteStructSen(namefile+".ff2m",structSen,structEndo);
+
+//////////////////////////////////////////////////////////////////////////////////
+
+}
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 7 : SENSITIVITY TO MACH MODIFICATIONS
+//    
+
+if ( mode == "SMa")
+{
+	//////////////////////////// Definition /////// //////////////////////////////////
+	XXxxxH<complex> defU(u0DMa,u0DMap,u0DMaT,u0DMarho);
+	XXXxxxH<complex> defU3D(u03DDMa,u03DDMap,u03DDMaT,u03DDMarho);
+	XXXxxxH<complex> defU3D(lamDu0,lamDu0p,lamDu0T,lamDu0rho);
+	XXXxxxH<complex> defU3D(lamRDu0,lamRDu0p,lamRDu0T,lamRDu0rho);
+	XXXxxxH<complex> defU3D(lamSmDu0,lamSmDu0p,lamSmDu0T,lamSmDu0rho);
+	XXXxxxH<complex> defU3D(lamSmAdvDu0,lamSmAdvDu0p,lamSmAdvDu0T,lamSmAdvDu0rho);
+	XXXxxxH<complex> defU3D(lamDMa,lamDMap,lamDMaT,lamDMarho);
+	XXXxxxH<complex> defU3D(u1C,u1Cp,u1CT,u1Crho);
+	XXX<complex> [SmAdjUx,SmAdjUy,SmAdjUz]; // Momemtum components of the base flow variation
+	XXX<complex> [lamDMaUx,lamDMaUy,lamDMaUz]; // Momemtum components of Mach variation
+	XXX<complex> [SmAdvAdjUx,SmAdvAdjUy,SmAdvAdjUz]; // Momemtum advection components of Mach variation
+
+	complex dlambdadMaMaconst, dlambdadMaMaconstAdv, dlambdadMau0const, dlambdadMa;
+	//////////////////////////// NORMALIZATION OF ADJOINT AMPLITUDE //////////////////
+	u1x[] = u1x[]/sqrt(SFBInnerProdDom3D(u1,u1,Rho3Db));
+	u1Ax[] = u1Ax[]/conj(SFBInnerProdDom3D(u1A,u1,Rho3Db));
+	cout << " Amplitude of Direct mode " << SFBInnerProdDom3D(u1,u1,Rho3Db) << endl; // TOOD: REMOVE ME ONCE DEBUG
+	cout << " Normalization of Adjoint mode " << SFBInnerProdDom3D(u1A,u1,Rho3Db) << endl;
+	/////////////////////// BASEFLOW VARIATION W.R.T. MACH ///////////////////////////
+	matrix<complex> A0 = jacobian(XXxxxH,XXxxxH);
+	complex[int] DNSMa = vNSDM(0,XXxxxH);
+	set(A0,solver=sparsesolver,tgv=-1);
+	u0DMax[] =  A0^-1*DNSMa;
+	defU3D(u03DDMa,u03DDMap,u03DDMaT,u03DDMarho) = [u0DMax,u0DMay,0,u0DMap,u0DMaT,u0DMarho];
+	//////////////////////////////////////////////////////////////////////////////////
+	u1Cx[] = conj(u1x[]); // conj of directmode
+	lambda = sigmaM + 1i*omegaM; // Eigenvalue
+	defU3D(lamRDu0,lamRDu0p,lamRDu0T,lamRDu0rho) = [0,0,0,0,0,u1Ax*u1Cx+u1Ay*u1Cy+u1Az*u1Cz+u1AT*u1CT]; // Variation w.r.t. BF of mat B
+	lamDu0x[] = conj(lambda)*lamRDu0x[]; // Variation w.r.t. BF of mat lambda*B
+	[SmAdjUx,SmAdjUy,SmAdjUz] = SmAdjqAdjMOM(1i*k,conj(lambda),u1C,u1A);
+	defU3D(lamSmDu0,lamSmDu0p,lamSmDu0T,lamSmDu0rho) = [SmAdjUx,SmAdjUy,SmAdjUz,
+														SmAdjqAdjSTATE(1i*k,u1C,u1A),SmAdjqAdjENER(1i*k,u1C,u1A),SmAdjqAdjCONT(1i*k,u1C,u1A)]; // Variation w.r.t. BF of mat A_k
+	lamDu0x[] = - lamDu0x[] - lamSmDu0x[]; // Variation w.r.t. BF
+	dlambdadMaMaconst = SFBInnerProdTotDom3D(lamDu0,u03DDMa); // Variation of lambda w.r.t. BF at Ma const
+	////////////////////////////////// ADVECTION COMPONENTS //////////////////////////////
+	[SmAdvAdjUx,SmAdvAdjUy,SmAdvAdjUz] = SmAdjqAdjMOMAdv(1i*k,conj(lambda),u1C,u1A);
+	defU3D(lamSmAdvDu0,lamSmAdvDu0p,lamSmAdvDu0T,lamSmAdvDu0rho) = [SmAdvAdjUx,SmAdvAdjUy,SmAdvAdjUz,
+	0,SmAdjqAdjENERAdv(1i*k,u1C,u1A),SmAdjqAdjCONTAdv(1i*k,u1C,u1A)];
+	dlambdadMaMaconstAdv = SFBInnerProdTotDom3D(-lamSmAdvDu0,u03DDMa); // Variation of lambda w.r.t. BF at Ma const ADV
+	////////////////////////////// VARIATION W.R.T. MACH AND BF CONST ///////////////////
+	[lamDMaUx,lamDMaUy,lamDMaUz] = AmVarMaMOMEMTUM(1i*k,u1);
+	defU3D(lamDMa,lamDMap,lamDMaT,lamDMarho) = [lamDMaUx,lamDMaUy,lamDMaUz,0,AmVarMaENERGY(1i*k,u1,U3Db),0];
+	dlambdadMau0const = SFBInnerProdTotDom3D(u1A,lamDMa); // Variation of lambda w.r.t. Ma at BF const
+	//////////////////////////////////////////////////////////////////////////////////
+	dlambdadMa = dlambdadMaMaconst - dlambdadMau0const; // Variation of lambda w.r.t. Ma
+	//////////////////////////// Post-Processing //////////////////////////////////////
+
+	string namefile=ffdatadir+"SensitivityMa";
+	ofstream fileMode(namefile+".txt");
+	fileMode << lamDu0x[]; 
+	fileMode << endl << endl << Re << endl << Ma << endl << sigmaM << "   " << omegaM  << endl;
+	cout << "Writing base flow variation in file " << namefile << endl;
+	SFWriteMaSen(namefile+".ff2m",lamDu0,lamSmDu0,lamDMa,u03DDMa,dlambdadMa);
+
+	//////////////////////////////////////////////////////////////////////////////////
+}
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 7 : SENSITIVITY TO MACH MODIFICATIONS
+//    
+
+if ( mode == "SForc")
+{
+	//////////////////////////// Definition /////// //////////////////////////////
+	XXxxxH<complex> defU(u0Adj,u0Adjp,u0AdjT,u0Adjrho);
+	XXxxxH<complex> defU(lamDF,lamDFp,lamDFT,lamDFrho);
+	XX<complex> [lamDUwallx,lamDUwally]; 
+	xh<complex> lamDTwall;
+	XXxxxH<complex> defU(u0DMa,u0DMap,u0DMaT,u0DMarho);
+	XXXxxxH<complex> defU3D(u03DDMa,u03DDMap,u03DDMaT,u03DDMarho);
+	XXXxxxH<complex> defU3D(lamDu0,lamDu0p,lamDu0T,lamDu0rho);
+	XXxxxH<complex> defU(lamD2Du0,lamD2Du0p,lamD2Du0T,lamD2Du0rho); 
+	XXXxxxH<complex> defU3D(lamRDu0,lamRDu0p,lamRDu0T,lamRDu0rho);
+	XXXxxxH<complex> defU3D(lamSmDu0,lamSmDu0p,lamSmDu0T,lamSmDu0rho);
+	XXXxxxH<complex> defU3D(u1C,u1Cp,u1CT,u1Crho);
+	XXX<complex> [SmAdjUx,SmAdjUy,SmAdjUz]; // Momemtum components of the base flow variation
+	//////////////////////// DEFINITION NORMAL TO WALL BOUNDARY /////////////////
+	fespace Nh(th,[P1,P1]); 
+	varf vNWall([nx,ny],[mx,my]) = on(2, nx=N.x,ny=N.y);
+	Nh [nx,ny]; // here the Dof of nx,ny are scramble .
+	nx[]=vNWall(0.,Nh,tgv=1);// set [nx,ny]  DoF. // There are some issues with this definition
+	//////////////////////////// NORMALIZATION OF ADJOINT AMPLITUDE //////////////////
+	u1x[] = u1x[]/sqrt(SFBInnerProdDom3D(u1,u1,Rho3Db));
+	u1Ax[] = u1Ax[]/conj(SFBInnerProdDom3D(u1A,u1,Rho3Db));
+	cout << " Amplitude of Direct mode " << SFBInnerProdDom3D(u1,u1,Rho3Db) << endl; // TOOD: REMOVE ME ONCE DEBUG
+	cout << " Normalization of Adjoint mode " << SFBInnerProdDom3D(u1A,u1,Rho3Db) << endl;
+	/////////////////////// BASEFLOW VARIATION W.R.T. MACH ///////////////////////////
+	matrix<complex> A0 = jacobian(XXxxxH,XXxxxH);
+	complex[int] DNSMa = vNSDM(0,XXxxxH);
+	set(A0,solver=sparsesolver,tgv=-1);
+	u0DMax[] =  A0^-1*DNSMa;
+	defU3D(u03DDMa,u03DDMap,u03DDMaT,u03DDMarho) = [u0DMax,u0DMay,0,u0DMap,u0DMaT,u0DMarho];
+	//////////////////////////////////////////////////////////////////////////////////
+	u1Cx[] = conj(u1x[]); // conj of directmode
+	lambda = sigmaM + 1i*omegaM; // Eigenvalue
+	defU3D(lamRDu0,lamRDu0p,lamRDu0T,lamRDu0rho) = [0,0,0,0,0,u1Ax*u1Cx+u1Ay*u1Cy+u1Az*u1Cz+u1AT*u1CT]; // Variation w.r.t. BF of mat B
+	lamDu0x[] = conj(lambda)*lamRDu0x[]; // Variation w.r.t. BF of mat lambda*B
+	[SmAdjUx,SmAdjUy,SmAdjUz] = SmAdjqAdjMOM(1i*k,conj(lambda),u1C,u1A);
+	defU3D(lamSmDu0,lamSmDu0p,lamSmDu0T,lamSmDu0rho) = [SmAdjUx,SmAdjUy,SmAdjUz,
+														SmAdjqAdjSTATE(1i*k,u1C,u1A),SmAdjqAdjENER(1i*k,u1C,u1A),SmAdjqAdjCONT(1i*k,u1C,u1A)]; // Variation w.r.t. BF of mat A_k
+	lamDu0x[] = - lamDu0x[] - lamSmDu0x[]; // Variation w.r.t. BF
+	defU(lamD2Du0,lamD2Du0p,lamD2Du0T,lamD2Du0rho) = defU(lamDu0,lamDu0p,lamDu0T,lamDu0rho);
+	////////////////////////////////// ADJOINT to BASE FLOW //////////////////////////////
+	matrix<complex> A0Adj=jacobian(XXxxxH,XXxxxH);
+	A0Adj = A0Adj';
+	set(A0Adj,solver=sparsesolver,tgv=-1);
+	u0Adjx[] =  A0Adj^-1*lamD2Du0x[];
+	/////////////////////////////////////////////////////////////////////////////////////
+	defU(lamDF,lamDFp,lamDFT,lamDFrho) = [u0Adjx,u0Adjy,0,u0AdjT,u0Adjrho];
+	[lamDUwallx,lamDUwally] = lambDUwall(Rho3Db,u0Adj,n);
+	lamDTwall = lambDTwall(u0Adj,n);
+
+
+	string namefile=ffdatadir+"SensitivityForcing";
+	ofstream fileMode(namefile+".txt");
+	fileMode << lamDu0x[]; 
+	fileMode << endl << endl << Re << endl << Ma << endl << sigmaM << "   " << omegaM  << endl;
+	cout << "Writing base flow variation in file " << namefile << endl;
+	SFWritSenForc(namefile+".ff2m",lamDu0,lamDF,lamDUwall,lamDTwall);
+}

@@ -1,0 +1,293 @@
+//
+//  PROGRAM Stab_2D.edp
+//	
+//	Performs the linear stability analysis of a aximetric flow with azimuthal component
+//  m = 0.
+//   
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re , shift(Re,im), Type, nev 
+//
+//   this solver will use either Arnoldi (if nev>1) or simple Shift-invert (if nev=1)
+//
+//	INPUT FILES :
+//		BaseFlow.txt	-> base flow 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//  	Eigenmode##.txt   (txt format for FreeFem)
+//      Eigenmode##.ff2m  (ff2m format for stabfem)
+//		Spectrum.txt -> All computed Eigenvalues
+//
+// 
+// 	ERROR MANAGEMENT : 
+//      if shift-invert iteration diverges, return value is 202 (managed by macro)
+//
+// History :
+// on 3/12/2019 Removed Sensitivity from here 
+
+cout << "$$$$ ENTERING StabAxi_m0.edp " << endl << "$$" << endl;    
+
+
+include "StabFem.idp";
+
+include "Param_Mapping.edp";
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 1 : parameters		
+//
+
+IFMACRO(!SFInputParametersStab)
+macro SFInputParametersStab()
+	real Re;                  
+	cout << "$$ Enter Reynolds                     >>   "; 
+	cin  >> Re;
+	cout << Re << endl;
+	real shiftr,shifti;	
+	cout << "$$ Enter SHIFT (re,im)                 >>  " ; 
+	cin  >> shiftr >> shifti;
+	cout << shiftr << " " << shifti << endl;
+	complex shift = 1i*shifti+shiftr;
+	int mAzimuthal;
+	cout << "$$ Azimuthal component (m=0)  >> " ;
+	cin >> mAzimuthal;
+	cout << mAzimuthal << endl;
+	string iadjoint;
+	cout << "$$ Direct (D), Adjoint (A), D&A+sensitivity (S) >> " ;
+	cin >> iadjoint;	
+	cout << iadjoint << endl;
+	int nev;
+    cout << "$$ Enter nev ? (will use simple shift-invert if nev = 1) >> " ;
+    cin >> nev ;
+    cout << nev << endl;
+	
+	cout << "$$ ### PARAMETERS SELECTED : " << endl;
+	cout << "$$ Re = " << Re<< endl;
+	cout << "$$ shift = " << shift << endl;
+	
+	if (iadjoint =="D") {cout << "$$ DIRECT PROBLEM" << endl;}
+	else if (iadjoint =="A") {cout << "$$ ADJOINT PROBLEM (discrete)" << endl;}
+	else {cout << "$$ ERROR WHEN SELECTING PROBLEM TYPE" << endl;};
+	
+	cout << "$$ nev = " << nev << endl;
+	//EOM
+ENDIFMACRO
+
+SFInputParametersStab;
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 2 : read files		
+//
+
+mesh th=readmesh(ffdatadir+"mesh.msh");                    ///// Read mesh
+
+fespace Xh(th,P2,periodic=MESHPERIODICITY);             ////// f.e. space for vel.
+fespace Mh(th,P1,periodic=MESHPERIODICITY);            ////// f.e. space for pressure
+fespace XXMh(th,[P2,P2,P1],periodic=MESHPERIODICITY); ////// f.e. space for triplet [u,v,p]
+XXMh<complex> [ux,ur,up];                 ///////  -> unknown for the Navier-Stokes problem
+XXMh [vx,vr,q];                 ///////  -> test for Navier-Stokes (should be defined as complex ???)
+XXMh [Ubx,Ubr,Pb];          ///////  -> Base Flow
+
+
+
+real ReB;
+{
+	ifstream cbin(ffdatadir+"BaseFlow.txt");
+	cbin >> Ubx[] >> ReB;
+}
+if(Re!= ReB)
+{ 
+	cout << "Warning : Re != ReB, is that really what you mean ???" << endl;
+} 
+
+real nu=1./Re; 
+// If Nu is something else than 1/Re define a macro CUSTOMnu in your Macros_StabFem.idp file
+IFMACRO(CUSTOMnu)
+nu = CUSTOMnu;
+ENDIFMACRO
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 3 : Customizable macros 	
+//
+
+// A. to disable complex mapping in case it is not needed
+IFMACRO(!dX)
+macro dX(a) dx(a) //EOM
+macro dY(a) dy(a) //EOM
+macro JJJ   1. //EOM
+ENDIFMACRO
+
+IFMACRO(!Yphys)
+macro Yphys() y //EOM
+ENDIFMACRO
+
+int m=0;
+
+
+//
+// Note : this solver requires three macros BoundaryConditionsStability, SFWriteMode, NormalizeMode.
+// Below are "default" values for these macros, to be used in the most basic cases. If you want to
+// customize these macros don't modify them here but copy them to your Macros_StabFem.idp file.
+//
+
+IFMACRO(!BoundaryconditionsStabilityAxi)
+macro BoundaryconditionsStabilityAxi(u,v)
+	           on(1,11,12,13,u#x=0,u#r=0.0) 		/* label 1 = inlet */
+             + on(2,21,22,23,u#x=0.0,u#r=0.0) 	/* label 2 = wall */
+             							/* Label 3 is outlet : No-stress as a result of integration by parts, nothing to write here ! */
+             + on(4,u#r=0.0)  			/* Label 4 is 'slip' or 'symmetry' condition on a horizontal boundary */
+             + on(5,u#x=0.0)  			/* Label 5 is 'slip' or 'symmetry' condition on a vertical boundary */
+             + int1d(th,6)(u#x*v#x*1e30)      
+             							/* Label 6 is a symmmetry axis */
+             							/* NB label 7 -> porous surface or deformable solid ; label 8 -> curved, deformable surface ; label 9 -> inner surface */  
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFWriteMode)
+macro SFWriteMode(namefile,u,ev,shift,m,typeFlow,iter)
+		 {
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1,periodic=MESHPERIODICITY); 
+    	 p1forff2m<complex> vort1;  		 
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Eigenmode for a Axi-incompressible problem " << endl;
+    	 file << "datatype " << typeFlow << " datastoragemode CxP2P2P1.2 datadescriptors ux,ur,p,lambdar,lambdai" << endl;
+    	 string descriptionFF="real* Re complex* eigenvalue complex shift int iter P1c vort"; 
+    	 file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << real(ev) << endl << imag(ev) << endl << real(shift) << endl << imag(shift) << endl << iter << endl << endl;
+		 vort1=-dY(u#x)+dX(u#r);		
+		for (int j=0;j<vort1[].n ; j++) file << real(vort1[][j]) << endl << imag(vort1[][j]) << endl;
+		};
+//EOM
+ENDIFMACRO	
+
+IFMACRO(!NormalizeMode)
+macro NormalizeMode(u)
+{
+	real NORM = sqrt(int2d(th)(abs(u#x)^2+abs(u#r)^2));
+	u#x[] = u#x[]/NORM;
+}
+//EOM
+ENDIFMACRO
+
+
+macro div(u) (dX(u#x)+dY(u#r)+u#r/Yphys)// macro for divergence 
+macro Conv(ua,ub,v) ( 
+              ((ua#x*dX(ub#x)+ua#r*dY(ub#x))+(ub#x*dX(ua#x)+ub#r*dY(ua#x)))*v#x 
+            + ((ua#x*dX(ub#r)+ua#r*dY(ub#r))+(ub#x*dX(ua#r)+ub#r*dY(ua#r)))*v#r 
+                    ) // macro for mutual convection operator
+macro D(u) [[dX(u#x), .5*(dX(u#r)+dY(u#x))], [.5*(dX(u#r)+dY(u#x)), dY(u#r)]] // macro for rate-of-deformation tensor
+real eps = 1e-12; // desingularisation term for matrix B, useful with some solvers
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 4 : Definition of operators
+//
+
+/////////////////////////////////////////////////////////////////////////////////
+////////    ---> varf for generalized eigenvalue problem: 		<--- //////////
+////////////////////////////////////////////////////////////////////////////////////
+
+
+varf   LNSE ([ux,ur,up],[vx,vr,q]) =
+   int2d(th)( 
+   			(-2*nu*(D(u):D(v))
+             + up*q*(eps) 
+             + up*div(v)
+             + div(u)*q
+             - Conv(u,Ub,v))*JJJ
+             )
+ + int2d(th)( -shift*(ux*vx+ur*vr)*JJJ )
+ + BoundaryconditionsStabilityAxi(u,v);
+
+varf   LNSEadjointDiscrete ([ux,ur,up],[vx,vr,q]) =
+   int2d(th)( 
+   			(-2*nu*(D(u):D(v))
+             + up*q*(eps) 
+             + up*div(v)
+             + div(u)*q
+             - Conv(v,Ub,u))*JJJ
+             )
+ + int2d(th)( -conj(shift)*(ux*vx+ur*vr)*JJJ ) // warning that shift/eigenvalues of adjoint are complex conjugates of direct !
+ + BoundaryconditionsStabilityAxi(u,v); 
+
+
+////// BUILD B-MATRIX 
+varf b([ux,ur,up],[vx,vr,q]) = int2d(th)( (ux*vx+ur*vr)*JJJ );
+matrix<complex> B= b(XXMh,XXMh,solver=CG);
+
+matrix<complex> OP,OPA;
+complex shiftOP,shiftOPA;
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5 : solves the problem 
+//
+string modeEig;
+
+////// BUILD OP-MATRIX=A-lambda*B 
+if(iadjoint=="D")
+	{ 
+		cout << " Direct linearised problem " << shift << endl;
+		cout << " Eigenvalue " << shiftOP << endl;
+		OP=LNSE(XXMh,XXMh,solver=sparsesolver); 
+		shiftOP = shift; modeEig = "EigenMode"; 
+	}
+else if(iadjoint=="A")
+	{ 
+		cout << " Adjoint linearised problem " << endl;
+		OP=LNSEadjointDiscrete(XXMh,XXMh,solver=sparsesolver); 
+		shiftOP = conj(shift); modeEig = "EigenModeA";
+	}
+else if(iadjoint=="S"||iadjoint=="cS"||iadjoint=="E") 
+	{ 
+		SFerror("$$ WARNING : type 'S'  and 'E' no longer supported ! please use SF_Sensitivity");
+	};
+
+///////////////////// CALL TO EIGENVALUE SOLVER 
+ 
+int k;
+complex[int] ev(nev); // to store nev eigein values
+complex[int,int] EigenVEC(OP.n,nev);
+
+SFEVSOLVE(k,nev,OP,B,shiftOP,ev,EigenVEC);
+
+int Nmodes = min(k,nev); // nb. de vecteurs propres à post-traiter
+XXMh<complex> [int] [eux,eur,eup](nev);   
+for (int i=0; i<Nmodes; i++)
+{
+	eux[i][] = EigenVEC(:,i);
+};
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 6 : post-processing 
+//
+
+string namefile;
+namefile=ffdatadir+"Spectrum.txt";
+ofstream fileVP1(namefile); 
+
+for (int i=0;i<nev;i++)
+{
+   fileVP1 << real(ev[i]) << " " << imag(ev[i]) << " " << Re << " " << 0 << " " << real(shift) << " " << imag(shift) << endl;
+   	cout << "$$ Valeur propre : " << i+1 << "  : " << ev[i] << endl;
+    namefile=ffdatadir+"Eigenmode"+(i+1);
+	 ux[] = eux[i][];
+	 NormalizeMode(u); 
+	  {
+	  ofstream fileMode(namefile+".txt");
+	  fileMode << ux[]; 
+	  fileMode << endl << real(ev[i]) << endl << imag(ev[i])  << endl;
+	  }
+	 cout << "$$ Writing eigenmode in file " << namefile << endl;
+	 SFWriteMode(namefile+".ff2m",u,ev[i],shift,m,modeEig,1);	 // MACRO DEFINED in StabFem_Macros.edp		 
+};
+
+cout << "$$$$ SUCCESSFULLY LEAVING StabAxi_m0.edp " << endl ;
+

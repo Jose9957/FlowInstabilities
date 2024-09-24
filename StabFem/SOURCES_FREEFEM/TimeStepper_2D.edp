@@ -1,0 +1,457 @@
+//
+//  PROGRAM TimeStepper_2D.edp
+//  Time-stepper to perform a Direct Numerical Simulation of 2D incompressible flows
+//
+//  This program uses Uzawa method with Cahouet preconditionner, and is adapted from the one
+//  used in Jallas, Marquet & Fabre (PRE 2017)
+//
+//  NB this program will work for the wake of a fixed cylinder, a rotating cylinder (steady rotation), or a wing at incidence.
+//  other cases will require adaptation regarding the boundary conditions, the input parameters, and the output files (metadata...) 
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re 		-> Reynolds number
+//      alpha   -> Incidence angle    
+//		it0 	-> starting time step number
+//		itmax 	-> final time step number
+//		dt 		-> time step
+//		iout 	-> how often to produce output files with snapshots
+//		istat	-> how often to write statistics
+//
+//	INPUT FILES :
+//		dnsfield_start.txt	->  initial flow
+// 		mesh.msh 			->  mesh in Freefem format
+//
+//  INCLUDED FILES :
+//		StabFem.idp	-> Definition of macros needed by the StabFem higher-level drivers
+//
+//  OUTPUT FILES :
+//		Snapshot_(i).txt	->  Snapshot number i (generated each iout time steps)
+//    Snapshot_(i).ff2m   ->  auxiliary file containing metatata and auxiliary data for StabFem drivers
+//		TimeStats.txt		->  time-statistics file
+//    TimeStats.ff2m   	->  auxiliary file containing metadata explaining how to interpret the previous file.
+//
+//  REQUIRED MACROS :
+// 	This program requires the following macros :
+//		Uinlet(y)				-> boundary condition at the inlet of the domain (default ux=1)
+//		DNSTimeStatisticsINIT	-> writes the header of the time-statistics files
+//		DNSTimeStatistics		-> writes statistics in dns_Stats.txt (at each istat time step)
+//		SFWriteDNSField			-> writes the metadata file associated to the snapshot files
+//  This program contains defaults basic versions of these macros. If you need to customize them,
+//	the recommended procedure is to duplicate them in your StabFem.idp file.
+//
+//
+//	DRIVER :
+//		This program is designed to be used with the Octave/Matlab driver SF_TS_Launch.m of the StabFem project.
+//		A tutorial example on how to use this driver is available here :
+//		https://stabfem.gitlab.io/StabFem/stable/cylinder_dns/SCRIPT_DNS_EXAMPLE.html
+//
+//  The program can also be used directy outside of the driver by Lanching FreeFem++
+//
+// 	Code initially written by O. Marquet & D. Jallas, circa 2015.
+//  Incorporated in the StabFem project in march-april 2019 by J. Sierra & D. Fabre
+
+
+
+//mpiComm comm(mpiCommWorld,0,0);// trick : make a no split mpiWorld
+//load "SuperLu.so"
+//load "symmetrizeCSR.so"
+
+include "StabFem.idp";
+
+/*=============================================
+=            Physical constants              =
+=============================================*/
+
+real Re,Reans,nu,Omegax;
+real dt,tps;
+
+/*=============================================
+=            Solver parameters               =
+=============================================*/
+
+real tolCG=-1.e-06;
+//int rep,itmax,iout,iviewcfl=1.0,istat,iwrite;
+real cpux,cpuy,cpu3;
+
+/*=============================================
+=            INPUT/OUTPUT                    =
+=============================================*/
+
+cout << "###" << endl <<  "### GENERIC TIME STEPPER for a 2D INCOMPRESSIBLE FLOW " << endl << "###" << endl;
+cout << "### Uzawa method with Cahouet preconditionners " << endl << "###" << endl;
+cout << "### Code written by O. Marquet & D. Jallas, adapted by J. Sierra & D. Fabre " << endl << "###" << endl << endl;
+cout << "###" << endl;
+
+// Physical parameters
+Re = getARGV("-Re",50.);            //    Reynlds number
+Omegax = getARGV("-Omegax",0.);     //    Rotation rate (if relevant)
+real alpha =  getARGV("-alpha",0.); //    Incidence angle (if relevant) 
+cout << "### Detected physical parameters : " << endl;
+cout << " Reynolds number             : Re = " << Re << endl;
+cout << " Incidence angle (degrees)   : alpha = " << Re << endl;
+cout << " Rotation rate           : Omegax = " << Omegax << endl;
+
+// Numerical parameters (also handled by getARGV in StabFem)
+int Niter  = getARGV("-Niter",100); //    Niter -> Number of time steps to be done
+dt    = getARGV("-dt",0.1);   //    dt    -> time step
+int  i0    = getARGV("-i0",0);     //    i0    -> Starting counter
+real t0    = getARGV("-t0",0.);     //    i0    -> Starting counter
+int iout  = getARGV("-iout",10);  //    iout  -> how often to produce output files with snapshots
+int istat = getARGV("-istat",1);  //    istat -> how often to write statistics
+cout << " Detected numerical parameters : " << endl;
+cout << " Number of iterations         : Niter = " << Niter << endl;
+cout << " Time step                    :    dt = " << dt << endl;
+cout << " iteration counter start      :    i0 = " << i0 << endl;
+cout << " Time start                   :    t0 = " << t0 << endl;
+cout << " Snapshot files written each  :  iout = " << iout << endl;
+cout << " Time statistics written each :  istat= " << i0 << endl;
+
+nu=1./Re;
+
+/*=============================================
+=            MESH AND FEM SPACES             =
+=============================================*/
+
+mesh th=readmesh(themeshfilename);
+fespace XH2(th,P2);
+fespace XH(th,P1);
+fespace XXxH(th,[P2,P2,P1]);
+
+{
+	XH2 cfl;
+	cfl=dt/hTriangle; // Initial CFL
+	cout << "--------------------------------" << endl;
+	cout << "--- Dimensionless parameters  ---" << endl;
+	cout << "--------------------------------" << endl;
+	cout << "------  Re            = " << Re << " ---" << endl;
+	cout << "------  dt            = " << dt << " ---" << endl;
+	cout << "------  CFL            = " << cfl[].max << " ---" << endl;
+	cout << "--------------------------------" << endl;
+	cout << "--------------------------------" << endl;
+}
+
+//////////////////////////////////
+/////  Fluid field variables //////
+//////////////////////////////////
+
+XH2 ux,uy,vort,uxc,uyc,uxw,uyw;
+XH up,pp,q,ps;
+XXxH [uxb,uyb,pb];
+
+real[int] rhsp(XH.ndof),dp(XH.ndof),sp(XH.ndof);
+real[int] tempu(XH2.ndof);
+real[int] rhsu(XH2.ndof),rhsv(XH2.ndof);
+real[int] rhsup(XH2.ndof),rhsvp(XH2.ndof);
+real[int] rhsupp(XH2.ndof),rhsvpp(XH2.ndof);
+real[int] uxp(XH2.ndof),uxpp(XH2.ndof);
+real[int] uyp(XH2.ndof),uypp(XH2.ndof);
+
+real alpha0,alpha1,alpha2,alpha3;
+real beta1,beta2,beta3;
+
+
+//////////////////////////////////
+/////  Initial condition     /////
+//////////////////////////////////
+
+if (SFCheckFileExists(ffdatadir+"Init.txt")==0)
+    {
+    SFwarning("No file Init.txt : starting from prescribed initial condition");
+    uxb[] = 0;
+    }
+else
+    {
+      ifstream file(ffdatadir+"Init.txt");
+      file >> uxb[];
+      cout << "$$ Reading file Init.txt " << endl;
+    };
+    XXxH [uDNSx,uDNSy,uDNSp];
+		[uDNSx,uDNSy,uDNSp] = [uxb,uyb,pb];
+
+    //////////////////////////////////////////////////////////////
+    /////           StabFem Macros (default values)         //////
+    //////////////////////////////////////////////////////////////
+
+
+    IFMACRO(!Uinlet)
+    macro Uinlet(y) cos(pi/180*alpha)
+    // EOM
+    ENDIFMACRO
+
+    IFMACRO(!Vinlet)
+    macro Vinlet(y) sin(pi/180*alpha)
+    // EOM
+    ENDIFMACRO
+
+IFMACRO(!SFWriteDNSField)
+    cout << "###" << endl;
+    cout << "### Using the default SFWriteDNSField macro to write snapshot files" << endl;
+    cout << "### (fitted for a cylinder wake flow; if you are using another geometry you may need to customize this macro ; see manual" << endl;
+    cout << "###" << endl;
+ 
+    macro SFWriteDNSField(filename,u,typeFlow,iter,tps)
+    {
+      cout << " writing "+filename+".txt and "+filename+".ff2m files..."<<endl;
+      ofstream filetxt(filename+".txt");
+    	filetxt << uDNSx[] << endl << endl;
+    	filetxt << Re << endl << endl;
+    	filetxt << tps << endl << endl;
+
+      	fespace p1forff2m(th,P1);
+        p1forff2m vort, testfunction;
+    	solve CalcVort(vort,testfunction)
+    	= int2d(th)(vort*testfunction) - int2d(th)(testfunction*(dx(u#y)-dy(u#x)));
+    	  p1forff2m psi,phi;
+    	solve Laplace(psi,phi)
+     	= int2d(th)(dx(psi)*dx(phi)+dy(psi)*dy(phi))
+     	- int2d(th)(-vort*phi)
+     	+ on(1,psi=y)+on(3,6,psi=y)+on(2,psi=0);  
+    	ofstream fileff2m(filename+".ff2m");
+       	{
+    		fileff2m << "### Data generated by Freefem++ ; " << endl;
+        fileff2m << "DNS Snapshot for a 2D-incompressible problem " << endl;
+        fileff2m << "datatype DNSField datastoragemode ReP2P2P1 datadescriptors ux,uy,p " ;
+        fileff2m << " meshfilename " << themeshfilename << endl;
+    		fileff2m << "real* Re real* t int* it  real* Fx real* Fy "; /* metadata */
+        fileff2m << " P1 vort P1 psi" << endl; /* auxiliary data */
+    		fileff2m << Re << endl;
+    		fileff2m << tps << endl;
+    		fileff2m << iter << endl;
+        real DragDNS = Trainee(uDNS,"N");
+        fileff2m << DragDNS << endl ;
+        real LiftDNS = Portance(uDNS,"N");
+        fileff2m << LiftDNS << endl ;
+    	  for (int j=0;j<vort[].n ; j++) fileff2m << vort[][j] << endl;
+          for (int j=0;j<psi[].n ; j++) fileff2m << psi[][j] << endl;
+         };
+    }
+    //EOM
+ENDIFMACRO
+
+    IFMACRO(!DNSTimeStatisticsINIT)
+    macro DNSTimeStatisticsINIT(namefile)
+    {
+        ofstream file(namefile+".ff2m");
+        file << "### Data generated by Freefem++ ; " << endl;
+        file << "DNS Time-series of a 2D-incompressible problem " << endl;
+        file << "datatype TimeStatistics datastoragemode columns datadescriptors t,Fx,Fy,Energy,cfl,iter" << endl;
+    }
+    //EOM
+    ENDIFMACRO
+
+    IFMACRO(!DNSTimeStatistics)
+    macro DNSTimeStatistics(namefile,uDNS,t,iter)
+    {
+    	fespace p1forff2m(th,P1);
+    	real Energie = int2d(th)((uDNS#x)^2+uDNS#y^2);
+    	p1forff2m  cfl=sqrt(uxc*uxc+uyc*uyc)*dt/hTriangle;
+    	real cflmax = cfl[].max;
+    	real Fx = int1d(th,2)(u#p*N.x)-nu*int1d(th,2)( (2*dx(u#x)*N.x+(dx(u#y)+dy(u#x))*N.y));
+    	real Fy = int1d(th,2)(u#p*N.y)-nu*int1d(th,2)( (2*dy(u#y)*N.y+(dx(u#y)+dy(u#x))*N.x));
+    	ofstream fileforces(namefile+".txt",append);
+    	fileforces << tps << " " << Fx << " " << Fy << " " << Energie  << " " << cflmax << " " << iter << endl;
+      cout << "iter : " << iter << " ; tps : " << tps << " ; cflmax : " << cflmax << endl;
+    }
+    //EOM
+    ENDIFMACRO
+
+
+
+///////////////////////////////////////////////
+/////           Formulation              //////
+///////////////////////////////////////////////
+
+varf vbx(u,q) = int2d(th)( dx(u)*q );
+varf vby(u,q) = int2d(th)( dy(u)*q );
+varf vau(u,v)= int2d(th)(  alpha0*u*v/dt + nu*(dx(u)*dx(v) + dy(u)*dy(v)) ) + on(4,u=1) + on(2,21,22,23,u=1) + on(1,u=1);
+varf vconvux(u,v)= int2d(th)(  ( uxc*dx(ux)+uyc*dy(ux) )*v );
+varf vconvuy(u,v)= int2d(th)(  ( uxc*dx(uy)+uyc*dy(uy) )*v );
+varf vap(p,q)= int2d(th,qft=qf1pTlump)(  dx(p)*dx(q) + dy(p)*dy(q) )+ on(3,p=0);
+varf vmassp(p,q) = int2d(th,qft=qf1pTlump)( p*q )+ on(3,p=0);
+varf vmassu(ux,uy) = int2d(th)( ux*uy );
+
+varf von1(ux,uy)= on(1,ux=1);
+varf von2(ux,uy)= on(2,21,22,23,ux=1);
+varf von4(ux,uy)= on(4,ux=1);
+
+// Boundary conditions at inlet
+varf vuInlet(u1,u2)= on(1,u1=Uinlet(y));
+varf vvInlet(u1,u2)= on(1,u1=Vinlet(y));
+
+// Boundary condition for the rotating cylinder
+varf vuOmega(u1,u2)= on(2,u1=Omegax*y/0.5);
+varf vvOmega(u1,u2)= on(2,u1=-Omegax*x/0.5);
+
+
+
+XH2 vuBCyl, vvBCyl, vuBInlet, vvBInlet;
+vuBCyl[]=vuOmega(0,XH2,tgv=1);
+vvBCyl[]=vvOmega(0,XH2,tgv=1);
+vuBInlet[]=vuInlet(0,XH2,tgv=1);
+vvBInlet[]=vvInlet(0,XH2,tgv=1);
+
+////////////////////////////////////
+/////  Matrix construction    //////
+////////////////////////////////////
+
+matrix Au,Ap,Bx,By,Dx,Dy,Mu,Mp;
+
+Ap= vap(XH,XH,solver=GMRES);
+Bx= vbx(XH2,XH);
+By= vby(XH2,XH);
+Dx= vbx(XH2,XH2);
+Dy= vby(XH2,XH2);
+Mu=vmassu(XH2,XH2,solver=GMRES);
+Mp=vmassp(XH,XH,solver=CG);
+
+XH2 on1,on2,on4;
+on1[]=von1(0,XH2,tgv=1);
+on2[]=von2(0,XH2,tgv=1);
+on4[]=von4(0,XH2,tgv=1);
+
+cout << "Factorisation" << endl;
+set(Ap,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+set(Mu,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+
+
+////////////////////////////////////
+/////  Function definition    //////
+////////////////////////////////////
+
+
+real[int] ppp(Ap.n),ptemp(Ap.n),pout(Ap.n);
+
+func real[int] divup(real[int] & pp)
+{
+	tempu = rhsu; tempu  += Bx'*pp;
+	tempu = on1[] ? vuBInlet[] : tempu;
+	tempu = on2[] ? vuBCyl[] : tempu;
+	tempu = on4[] ? vuBInlet[] : tempu;
+	ux[] = Au^-1*tempu;
+
+	tempu  = rhsv; tempu  += By'*pp;
+	tempu = on1[] ? vvBInlet[] : tempu;
+	tempu = on2[] ? vvBCyl[] : tempu;
+	tempu = on4[] ? vvBInlet[] : tempu;
+	uy[] = Au^-1*tempu;
+
+	ppp =  Bx*ux[];
+	ppp += By*uy[];
+
+	return ppp ;
+};
+func real[int] precCahouet(real[int] & pin)
+{
+	pout=Mp^-1*pin;
+	pout*=nu;
+	ptemp=Ap^-1*pin;
+	pout+=alpha0/dt*ptemp;
+
+	return pout;
+};
+
+
+
+
+/////////////////////////////////////////////
+/////////// Preparing Time loop /////////////
+/////////////////////////////////////////////
+
+DNSTimeStatisticsINIT(ffdatadir+"TimeStats")
+{ ofstream file3(ffdatadir+"TS.status");
+  file3 << "Running" << endl;
+}
+int it = i0;
+SFWriteDNSField(ffdatadir+"Snapshot_"+FixedFormatInt(it,8),uDNS,"DNSField",i0,t0)
+
+
+tps = t0;
+ux = uxb; uy=uyb; up = pb;
+
+/////////////////////////////////////////////
+///////////      Time loop      /////////////
+/////////////////////////////////////////////
+
+cout << "Time Loop" << endl;
+for (int it=i0+1;it<=i0+Niter;it++)
+{
+	cpux=time();
+
+	if(it==i0+1)
+	{
+		alpha0=1.; alpha1=1.; alpha2=0.; beta1=-1.; beta2=0.;
+		Au= vau(XH2,XH2,solver=GMRES,tgv=-1);
+		set(Au,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+	};
+
+	if(it==i0+3)
+	{
+		alpha0=3./2.; alpha1=2.; alpha2=-1./2.; beta1=-2.; beta2=1.;
+		Au= vau(XH2,XH2,solver=GMRES,tgv=-1);
+		set(Au,solver=sparsesolver,sparams="DiagPivotThresh=0.00,ColPerm=MMD_AT_PLUS_A,Equil=YES,SymmetricMode=YES");
+	};
+
+
+	//////////////////////////
+	// Construction du rhs  //
+	//////////////////////////
+
+	tempu=alpha2/dt*uxp; uxp=ux[]; tempu+=alpha1/dt*uxp; rhsu=Mu*tempu;
+	tempu=alpha2/dt*uyp; uyp=uy[]; tempu+=alpha1/dt*uyp; rhsv=Mu*tempu;
+		rhsu+=beta2*rhsup; rhsv+=beta2*rhsvp;
+	uxc[]=ux[];
+	uyc[]=uy[];
+	tempu=0.0; rhsup=Mu*tempu; tempu=Dx*ux[]; rhsup+=uxc[].*tempu; tempu=Dy*ux[]; rhsup+=uyc[].*tempu;
+	tempu=0.0; rhsvp=Mu*tempu; tempu=Dx*uy[]; rhsvp+=uxc[].*tempu; tempu=Dy*uy[]; rhsvp+=uyc[].*tempu;
+	rhsu+=beta1*rhsup; rhsv+=beta1*rhsvp;
+
+	// Resolution probleme de Stokes
+	q[]=0;
+	cpuy=time();
+	LinearCG(divup,precon=precCahouet,up[],q[],eps=tolCG,nbiter=20,verbosity=0);
+  tps+=dt;
+
+  // OUTPUT
+	if(it%iout==0||it==Niter)
+	{
+		XXxH [uDNSx,uDNSy,uDNSp];
+		[uDNSx,uDNSy,uDNSp] = [ux,uy,up];
+		SFWriteDNSField(ffdatadir+"Snapshot_"+FixedFormatInt(it,8),uDNS,"DNSField",it,tps)
+        cout << "### Generating output file at it = " << it << endl;
+    };
+
+  if(it%istat==0||it==Niter+i0)
+	{
+    DNSTimeStatistics(ffdatadir+"TimeStats",u,t,it)
+	}
+
+
+  // Tests for divergence / exit
+    if (it%10==0) {CleanExitFromTimeStepping(ffdatadir+"TS.status");}; /* Check a possible clean exit;  */
+    if (int2d(th)(ux^2+uy^2)>1e10) /* Divergence */
+    {
+      ofstream file3(ffdatadir+"TS.status");
+      file3 << "diverged" << endl;
+      SFerror("Process Diverged ! ");
+        XXxH [uDNSx,uDNSy,uDNSp];
+		[uDNSx,uDNSy,uDNSp] = [ux,uy,up];
+		SFWriteDNSField(ffdatadir+"Snapshot_"+FixedFormatInt(it,8),uDNS,"DNSField",it,tps)
+      exit(203);
+    };
+
+
+
+
+
+};
+
+//mpiBarrier(comm);
+/////////////////////////////////////////////
+/////////  Fin Boucle en temps   ////////////
+/////////////////////////////////////////////
+
+
+{
+      ofstream file3(ffdatadir+"TS.status");
+      file3 << "completed" << endl;
+};

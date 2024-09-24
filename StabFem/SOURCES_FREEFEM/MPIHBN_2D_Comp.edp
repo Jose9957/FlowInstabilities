@@ -1,0 +1,817 @@
+//
+//  PROGRAM MPIHBN_2DComp.edp
+//	
+//	DOCUMENTATION TO BE DONE
+//
+
+include "StabFem.idp";
+load "MUMPS"
+load "shell"
+load "metis";
+load "MPICG"
+include "MPIplot.idp"
+include "MPIGMRESmacro.idp"
+
+macro mpicout() if(mpirank==0) cout //EOF
+
+/////////////////////////////////////////////////////////////////////////////////
+
+mpiComm comm(mpiCommWorld, 0, 0);
+
+int mpicommSize = mpiSize(mpiCommWorld);
+int mpirank = mpiRank(mpiCommWorld);
+int status; 
+
+mpicout << "MPI Comm size = " << mpicommSize << endl;
+cout << "MPI rank in Comm = " << mpiRank(comm) << endl;
+
+
+/////////////////////////////////////////////////////////////////////////////////
+mesh thG,th;
+if(mpirank==0)
+{
+thG=readmesh(ffdatadir+"mesh.msh");                    ///// Read mesh
+int[int] nupart(thG.nt);
+nupart=0; 
+if(mpisize>1)
+	metisdual(nupart, thG, mpisize);
+th=change(thG,fregion= nupart[nuTriangle]);
+}
+broadcast(processor(0),th); 
+thG=readmesh(ffdatadir+"mesh.msh");    // Global mesh
+// partition of the mesh ...
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 1 : parameters		
+//
+int NModes; // Number of modes
+real Re, Ma, ReM, MaM, nu;
+real omega, omegaM, sigmaM, domega;
+real gamma=1.4; //////////////////         GAMMA        //////////////////////////
+real Pr=0.7;         //////////////////  PRANDTL NUM   //////////////////////////
+real sigma1; // parameter sigma1 from Mantic-lugo et al ; should be zero for harmonic balance
+string normalisation; // Normalisation method
+real Liftguess,Eguess; // Normalisation amplitude
+string 	symmetry, symmetryBaseFlow, symmetryODD, symmetryEVEN ;
+string PCtype; // In the current implementation 0 LU, 1 Block Jacobi
+int mOrder; // Order of the  Shamanskii’s m-method (https://arxiv.org/pdf/1609.03328.pdf)
+// Variables for Newton iteration
+real tol = 1e-6;
+real dSolNorm = 1; 
+real dSolRelNorm = 1;
+real totalNorm=0;
+int iter=1;
+int totalIter; // number of times RHS is evaluated.
+real cpuTime; // Profiling in Newton Method / Assembling / Factorisation
+int  GMRESverbo= 1;		// For plotting the  GMRES iterations
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 2 : FEM Spaces and Fields
+//  
+
+/////////////////////////////////////////////////////////////////////////////////
+
+fespace XH2(th,P2);
+fespace XXxxxH(th,[P2,P2,P1,P1,P1]); // space for (ux,uy,p,T,rho)
+fespace XH2G(thG,P2);
+fespace XXxxxHG(thG,[P2,P2,P1,P1,P1]); // space for (ux,uy,p,T,rho)
+
+XH2 AMPFORCE;
+//////////////////////////// MARCRO /////////////////////////// 
+macro defU(u,p,T,rho)[u#x,u#y,p,T,rho]//EOF
+macro defUU(u)[u#x,u#y,u#p,u#T,u#rho]//EOF
+
+include "HBN/HBN_2DComp_Fields.edp"; // Defined fields
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 3 : Customizable macros 	
+//
+//
+
+// A. (to disable coordinate mapping if not relevant)
+IFMACRO(!dX)
+macro dX(a) dx(a) //EOM
+macro dY(a) dy(a) //EOM
+macro JJJ   1.0 //EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFParametersGetArgv)
+macro SFParametersGetArgv
+/* Numerical parameters (handled by getARGV) */
+include "getARGV.idp"
+mOrder=getARGV("-mOrder",1);
+tol=getARGV("-tol",1e-5);
+GMRESverbo=getARGV("-GMRESverbo",1);
+Pr=getARGV("-Pr",0.7);
+gamma=getARGV("-gamma",1.4);
+real[int] vEguess (NModes);
+
+for (int imode=0; imode < NModes; imode++)
+{
+	string strEnergyNorm = "-Eguess"+(imode+1);
+	real EnergyModeNorm=getARGV(strEnergyNorm,-1.0);
+	vEguess[imode] = EnergyModeNorm;
+	mpicout << "Eguess"+(imode+1) << " " << EnergyModeNorm << endl;
+}
+ // EOF
+ENDIFMACRO
+
+
+
+
+IFMACRO(!SFParameters)
+macro SFParameters()
+mpicout << " Number of modes to be computed : " << endl;
+NModes = getARGV("-NModes",2);
+mpicout << " --> Number of modes to be computed = " << NModes << endl;
+mpicout << " Preconditioning? (none - LU, bjacobi - Block Jacobi) : " << endl;
+PCtype = getARGV("-PCtype","none");
+mpicout << " --> Preconditioning = " << PCtype << endl;
+mpicout << " Choice of Ma : " << endl;
+Ma=getARGV("-Ma",0.02);
+mpicout << " --> Ma = " << Ma << endl;
+mpicout << " Choice of Re : " << endl;
+Re=getARGV("-Re",340.0);
+mpicout << " --> Re = " << Re << endl;
+nu=1/Re;
+SFParametersGetArgv; /* Parameters by getARGV */
+//EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFReadMeanFlow)
+macro SFReadMeanFlow()
+{
+if(mpirank==0)
+{
+	real Relu;
+    real Malu; /* added by David to fix a bug */
+	mpicout << "starting  from mean flow in file MeanFlow_guess.txt" << endl;
+	ifstream cbin(ffdatadir+"MeanFlow_guess.txt");
+	cbin >> ubGx[] >> Relu >> Malu;
+	mpicout << " Re of initial meanflow " << Relu << endl;
+	if(Relu!=Re){ mpicout << "WARNING : Re not equal to that of the guess mean flow" << endl;};
+}
+broadcast(processor(0,comm),ubGx[]); /* broadcast the full initial meanflow */
+defUU(ub) = defUU(ubG); /* Restriction to the mpirank^{th} domain */
+[u0x,u0y,u0p,u0T,u0rho] = [ubx,uby,ubp,ubT,ubrho]; 
+}//EOM
+ENDIFMACRO
+
+IFMACRO(!SFNullInitCond)
+macro SFNullInitCond(unc,uns)
+	defUU(unc)=[0,0,0,0,0];
+	defUU(uns)=[0,0,0,0,0];
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFHBFromMode)
+macro SFHBFromMode(nmode,unc,uns,NameFile)
+	if(mpirank==0)
+	{
+		
+		mpicout << "starting  from mode in file " + NameFile << endl;
+		ifstream cbin(ffdatadir+NameFile);
+		if(nmode == 1) /* Read sigmaM, omegaM only if first mode */
+		{
+			cbin >> u1Gx[]  >> sigmaM >> omegaM; 
+		}
+		else
+		{
+			cbin >> u1Gx[];
+		}
+	}
+		mpiBarrier(comm);
+		broadcast(processor(0),u1Gx[]); /* broadcast the full initial guess */
+		defUU(u1) = defUU(u1G); /* restriction into the mpirank^{th} domain */
+		mpicout << " 			omega of the mode "+ nmode +" = " << omegaM << endl;
+		mpicout << "   		Energy-Norm (A) of guess mode "+ nmode +" = " << EnergyNorm(u1,ub) << endl;	
+		defUU(unc) = [real(u1x), real(u1y), real(u1p), real(u1T), real(u1rho)]; 
+		defUU(uns) = [-imag(u1x), -imag(u1y), -imag(u1p),  -imag(u1T),  -imag(u1rho)];  
+		mpicout << "   		Energy-Norm (A) of mode "+ nmode +" = " << EnergyNormCS(unc,uns,ub,symmetrynMode) << endl << endl;
+	
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFReadHBN)
+macro SFReadHBN(nmode,unc,uns)
+{
+	int testCB;
+	string HBNameFile="HBMode"+nmode+"_guess.txt";
+	SFcheckfile(HBNameFile,testCB);
+	if (testCB<0)
+	{
+		SFwarning("No file"+ HBNameFile +": starting from null initial condition");
+		SFNullInitCond(unc,uns);
+	}
+	else
+	{
+		SFHBFromMode(nmode,unc,uns,HBNameFile);
+	}
+	mpicout <<  " Energy-norm after renarmalisation : " << EnergyNormCS(unc,uns,u0,symmetrynMode) << endl;	
+}//EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFSpongeFunc)
+macro SFSpongeFunc() // EOM Function AmpSponge
+	func real AmpSponge(real M, real xinf, real xsup, real yinfsup) 
+	{
+	  if(M>0)
+	    return abs(1.+1./M)*(x>xsup)*(alpha*(x-xsup))+abs(1.-1./M)*(x<xinf)*(alpha*(xinf-x))+abs(1./M)*(abs(y)>yinfsup)*(alpha*(abs(y)-yinfsup));
+	  else
+	    return 0.0;
+	}
+ENDIFMACRO
+
+IFMACRO(!SFParameters2)
+macro SFParameters2()
+{
+mpicout << " Guess for omega ? [-1 -> the one read in the guess file] " << endl; 
+omega=getARGV("-omega",-1.0);
+if(omega==-1){omega = omegaM;};
+mpicout << " -->  omegaguess = " << omega << endl;
+mpicout << " Choice of sigma1 : [0 for Harmonic balance ; not zero for self-consistent] " << endl; 
+sigma1=getARGV("-sigma",0);
+mpicout << " --> sigma1 = " << sigma1 << endl;
+mpicout << " Normalisation choice ?  [none, L or E]" << endl;
+normalisation=getARGV("-normalisation","none");
+mpicout << " --> " << normalisation << endl;
+mpicout << " Symmetry of the base flow : " << endl; 
+symmetryBaseFlow=getARGV("-symmetryBaseFlow","N");
+mpicout << " -->  Symmetry of the base flow = " << symmetryBaseFlow << endl;	
+mpicout 	<< " symmetry : " << endl; 
+symmetry=getARGV("-symmetry","N");
+mpicout 	<< " -->  symmmetry = " << symmetry << endl;	
+if(symmetry=="A") { symmetryODD="A" ; symmetryEVEN = "S";};
+if(symmetry=="S") { symmetryODD="S" ; symmetryEVEN = "S";};
+if(symmetry=="N") { symmetryODD="N" ; symmetryEVEN = "N";};
+/* Normalisation input */
+if(normalisation=="none")
+{ 
+	mpicout << " -> No normalization for the mode " << endl;
+}
+}// EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFWriteBaseFlow)
+macro SFWriteBaseFlow(filename,u,typeFlow,iter)
+	{
+		fespace p1forff2m(th,P1);  
+	    p1forff2m vort,divergence;
+		vort=dy(u#x)-dx(u#y);
+	    divergence=dx(u#x)+dy(u#y); 
+	    real Fx,Fy;
+	    Fx = Drag(nu,u,symmetryBaseFlow);
+		Fy = Lift(nu,u,symmetryBaseFlow);
+		ofstream file(filename);
+	   	{
+		file << "### Data generated by Freefem++ ; " << endl;
+	    file << typeFlow << " for a 2D-compressible problem " << endl;
+	    file << "datatype " << typeFlow << " datastoragemode ReP2P2P1P1P1.2 datadescriptors ux,uy,p,T,rho,Re,Ma" << endl;
+		file << "real* Re real* Ma real Fx real Fy P1 vort P1 div real iter " << endl << endl ; 
+		file << Re << endl;	
+	    file << Ma << endl;
+	    file << Fx << endl;	
+	    file << Fy << endl;
+				for (int j=0;j<vort[].n ; j++) file << vort[][j] << endl;
+	            for (int j=0;j<vort[].n ; j++) file << divergence[][j] << endl;
+				file << iter << endl;
+		}
+	}; 
+// EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFNormalisationHB)
+macro SFNormalisationHB(normalisation,nMode,uModec,uModes)
+{
+	string symmetrynMode;
+	if( (nMode%2)== 0){symmetrynMode = symmetryEVEN;}
+	else {symmetrynMode = symmetryODD;}
+
+if(normalisation=="none")
+	{ 
+		mpicout << "No normalization for the mode " << endl;
+	}	
+else if(normalisation=="L")
+	{
+		mpicout << "Fy before for mode cos("+nMode+"omega t) : " << dLift(1/Re,uModec,symmetrynMode) << endl;
+		real modenormCos = Lift(1/Re,uModec,symmetryODD);
+		mpicout << "Fy before for mode sin("+nMode+"omega t) : " << dLift(1/Re,uModes,symmetrynMode) << endl;
+		real modenormSin = Lift(1/Re,uModes,symmetryODD);
+		uModec#x[] = Liftguess/modenormCos*uModec#x[];
+		uModes#x[] = Liftguess/modenormSin*uModes#x[];
+		mpicout << "Fy after normalisation for mode cos("+nMode+"omega t) : " << dLift(1/Re,uModec,symmetryODD) << endl;
+		mpicout << "Fy after normalisation for mode sin("+nMode+"omega t) : " << dLift(1/Re,uModes,symmetryODD) << endl;
+	    mpicout << "   ### Energy-norm A = " << EnergyNormCS(uModec,uModes,u0,symmetrynMode) << endl << endl;	
+	}	
+else if(normalisation=="E")
+	{
+		mpicout << "Energy-norm for mode cos("+nMode+"omega t) : " << EnergyNormCS(uModec,uModes,u0,symmetrynMode) << endl;
+		real modenorm = EnergyNormCS(uModec,uModes,u0,symmetrynMode);
+		if(vEguess[nMode-1] == -1.0) 
+		{
+			if(modenorm<=0)
+			{
+				vEguess[nMode-1] = 1.0; 
+			}
+			else
+			{
+				vEguess[nMode-1] = modenorm ; /* In the case Energyi = -1 do nothing */
+			}
+		}
+		uModec#x[] = vEguess[nMode-1]/modenorm*uModec#x[]; 
+		uModes#x[] = vEguess[nMode-1]/modenorm*uModes#x[]; 
+		mpicout << "Energy-norm after renarmalisation : " << EnergyNormCS(uModec,uModes,u0,symmetrynMode) << endl;	
+		mpicout << "Fy after normalisation for mode cos("+nMode+"omega t) : " << dLift(1/Re,uModec,symmetrynMode) << endl;
+		mpicout << "Fy after normalisation for mode sin("+nMode+"omega t) : " << dLift(1/Re,uModes,symmetrynMode) << endl;
+	};
+}//EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFWriteMode)
+macro SFWriteMode(namefile,u,ev,shift,typeFlow,iter,NMode)
+{
+	ofstream file(namefile);
+	fespace p1forff2m(th,P1); 
+	p1forff2m xx,yy;
+	xx=x;
+	yy=y;
+	complex Fx,Fy;
+	if((NMode%2)==1)
+	{
+		Fx = Drag(nu,u,symmetryODD);
+		Fy = Lift(nu,u,symmetryODD);
+	}
+	else
+	{
+		Fx = Drag(nu,u,symmetryEVEN);
+		Fy = Lift(nu,u,symmetryEVEN);
+	}
+    p1forff2m<complex> ux1,uy1,pp1,vort1,rho1,T1,divergence;
+	file << "### Data generated by Freefem++ ; " << endl;
+	file << "Eigenmode for a 2D-compressible problem " << endl;
+	file << "datatype " << typeFlow <<" datastoragemode CxP2P2P1P1P1 datadescriptors ux,uy,p,T" << endl;
+	string descriptionFF="real* Re real* Ma real* NMode real* omega  real AEnergy complex Fx complex Fy int iter P1c vort P1c divergence "; 
+	file << descriptionFF << endl << endl ; 
+	file << Re << endl 
+		 << Ma << endl
+		 << NMode << endl
+		 << imag(ev) << endl
+		 << EnergyNorm(u,u0) << endl
+		 << real(Fx) << " " << imag(Fx) << endl 
+		 << real(Fy) << " " << imag(Fy) << endl
+		 << iter << endl << endl;
+
+	vort1=dy(u#x)-dx(u#y); 
+	divergence=dx(u#x)+dy(u#y); 	
+	for (int j=0;j<ux1[].n ; j++) file << real(vort1[][j]) << " " << imag(vort1[][j]) << endl;
+    for (int j=0;j<ux1[].n ; j++) file << real(divergence[][j]) << " " << imag(divergence[][j]) << endl;
+	};
+//EOM	
+ENDIFMACRO
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 4 : Definition of problem
+//
+    
+/////////////////////// Macros coordinate system /////////////////////////////////
+
+macro div(u) ((dx(u#x)+dy(u#y)))   //EOM
+macro ugradf(u,f) ((u#x*dx(f)+u#y*dy(f)))    //
+macro ugradfConj(u,f) ((conj(u#x)*dx(f)+conj(u#y)*dy(f)))    //
+macro realInnerProd(u,v) ((u#x*v#x + u#y*v#y)) //
+macro termnonlinear(u,v,w) ((w#x*(u#x*dx(v#x)+u#y*dy(v#x))+w#y*(u#x*dx(v#y)+u#y*dy(v#y)))) //
+macro Grad(u) [[dx(u#x),dx(u#y)],[dy(u#x),dy(u#y)]]//EOM
+macro Strain(u)[[dx(u#x),0.5*(dx(u#y)+dy(u#x))],[0.5*(dx(u#y)+dy(u#x)),dy(u#y)]]//EOM
+macro gradgrad(u,v)(dx(u)*dx(v)+dy(u)*dy(v))//EOM
+
+//////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////// Macros Harmonic Balance //////////////////////////////////
+
+macro F2Omega(ua,ub,nOmega,v) ( nOmega*( ua#rho*realInnerProd(ub,v) + ua#rho*ub#T*v#T) ) // EOM for term F2Omega
+
+macro F20Rho(ua,ub,v) ( (ua#rho*div(ub) + ugradf(ua,ub#rho))*v#rho ) //EOM macro for F20Rho
+
+macro F20T(ua,ub,v) (
+			v#T*( 
+			- gamma*(gamma-1.0)*Ma^2/Re*(2.0*((Strain(ua):Strain(ub)))-2.0/3.0*(div(ua)*div(ub)))
+			)
+) //EOM macro for F20T
+
+macro F20P(ua,ub,v)  (-v#p*ua#rho*ub#T) //EOM macro for F20T
+
+macro F20(ua,ub,v) (F20Rho(ua,ub,v)+F20T(ua,ub,v)+F20P(ua,ub,v)) //EOM F20 Double Nonlinear term not involving Omega
+
+macro F30U(ua,ub,uc,v) ( ua#rho*termnonlinear(ub,uc,v) ) // EOM for term F30U
+
+macro F30T(ua,ub,uc,v) ( v#T*(ua#rho*ugradf(ub,uc#T) )
+						 + v#T*(gamma-1.0)*(ua#rho*ub#T*div(uc)) ) // EOM for term F30T
+
+macro F30(ua,ub,uc,v) (F30U(ua,ub,uc,v)+F30T(ua,ub,uc,v)) //EOM F30 Triple Nonlinear term
+
+macro Linear0U(u,v) ( -u#p*div(v)
+					  +2.0/Re*(Strain(u):Grad(v))
+					  -2.0/(3.0*Re)*(div(u)*div(v)) ) //EOM Linear0U
+
+macro Linear0T(u,v) ( gamma/(Pr*Re)*gradgrad(u#T,v#T) ) //EOM Linear0T
+
+macro Linear0P(u,v) ( gamma*Ma^2*u#p*v#p ) //EOM Linear0P
+
+macro Linear0(u,v) ( Linear0U(u,v) + Linear0T(u,v) + Linear0P(u,v) ) //EOM Linear operator not depending on Omega
+
+macro LinearOmega(u,nOmega,v) ( nOmega*u#rho*v#rho ) //EOM Linear operator depending on Omega
+
+macro CP(v)  (v#p) //EOM macro for constant term of termodynamic pressure
+
+macro NS(u,v)(  Linear0(u,v) + F20(u,u,v) + F30(u,u,u,v) + CP(v) ) //EOM macro for NS operator
+
+macro NSL(U,u,v)( Linear0(u,v) + F20(u,U,v) + F20(U,u,v) + F30(u,U,U,v) + F30(U,u,U,v) + F30(U,U,u,v) 
+				) // EOM macro for linear NS operator
+
+macro NSLDerU(dU,U,u,v)( F20(u,dU,v) + F20(dU,u,v) 
+						+ F30(u,dU,U,v) + F30(u,U,dU,v)
+					    + F30(dU,u,U,v) + F30(U,u,dU,v)
+					    + F30(dU,U,u,v) + F30(U,dU,u,v) 
+				) // EOM macro for linear NS operator
+
+//////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////// Macros Boundary conditions ///////////////////////////////
+
+macro Boundaryconditions(du,us,dp,dT,drho,symmetry)
+               on(1,du#x=0.0,du#y=0.0,drho=0.0) 
+             + on(11,drho=0.0)
+             + on(3,du#x=0.0,du#y=0.0,drho=0.0)
+             + on(2,21,du#x=0.0,du#y=0.0)
+             + on(6,du#y=0.0)
+//EOM
+//////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////// Macros Global monitors ///////////////////////////////////
+
+macro Lift(nu,u,symmetry)   
+	(
+	(1*(symmetry=="N")+2*(symmetry=="A"))
+	*(
+	int1d(th,29)(u#p*N.y)
+	+ int1d(th,29)( -nu*((((4.0/3.)*dy(u#y) - (2.0/3.)*dx(u#x))*N.y+(dx(u#y)+dy(u#x))*N.x)))
+	)
+	)
+// EOM
+
+macro dLift(nu,u,symmetry)   
+	(
+
+	int1d(th,2,21,22,23)((1*(symmetry=="N")+2*(symmetry=="A"))*(u#p)*N.y)
+	+ int1d(th,2,21,22,23)( -nu*(1*(symmetry=="N")+2*(symmetry=="A"))*((((4.0/3.)*dy(u#y) - (2.0/3.)*dx(u#x))*N.y+(dx(u#y)+dy(u#x))*N.x)))
+	
+	)
+// EOM 
+macro Drag(nu,u,symmetry)    
+	(
+	(1*(symmetry=="N")+2*(symmetry=="S"))
+	*(
+	int1d(th,2,21,22,23)(u#p*N.x)
+	+ int1d(th,2,21,22,23)( -nu*((((4./3.)*dx(u#x) - (2./3.)*dy(u#y))*N.x+ (dx(u#y)+dy(u#x))*N.y)))
+	)
+	)
+// EOM Drag FORCE
+
+macro PressureHole(u)    
+	(
+	"Not in this case"
+	)
+// EOM PressureHole
+
+macro FluxHole(u)    
+	(
+	"Not in this case"
+	)
+// EOM FluxHole
+
+IFMACRO(!param1)
+macro param1() nu //EOM
+ENDIFMACRO
+
+IFMACRO(!param2)
+macro param2() symmetryODD//EOM
+ENDIFMACRO
+
+IFMACRO(!param3)
+macro param3() 0//EOM
+ENDIFMACRO
+
+IFMACRO(!param4)
+macro param4() 0//EOM
+ENDIFMACRO
+
+IFMACRO(!CompatibilityCond)
+macro CompatibilityCond(u,param1,param2,param3,param4)
+	  dLift(param1,u,param2)
+//EOM
+ENDIFMACRO
+
+macro EnergyNorm(u,U) sqrt(int2d(th)( 0.25*JJJ*U#rho*(abs(u#x)^2+abs(u#y)^2+abs(u#T)^2) + abs(u#rho)^2 ) )
+// EOM "Energy" norm for a real or complex field
+
+macro EnergyNormCS(uc,us,U,symmetry) sqrt( .25* int2d(th)( JJJ*(U#rho*(abs(uc#x)^2+abs(uc#y)^2+abs(uc#T)^2 +
+				  	      abs(us#x)^2+abs(us#y)^2+abs(us#T)^2) + abs(uc#rho)^2 + abs(us#rho)^2)) )
+// EOM "Energy" norm for a field in complex coordiantes (q=0.5*(qc-i*qs))
+
+//////////////////////////////////////////////////////////////////////////////////
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5 : Assembling macros
+//
+
+IFMACRO(!SFNewtonIterOutput)
+macro SFNewtonIterOutput()
+	mpicout << endl << "Newton loop step " << iter << endl;
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFNewtonCondition)
+macro SFNewtonCondition() dSolNorm>tol&&dSolNorm<1e6&&iter<100 // EOM
+ENDIFMACRO
+
+IFMACRO(!SFRHSAssemblingPCBCJacobi)
+macro SFRHSAssemblingPCBCJacobi()
+	mpicout << " Assembling RHS for block Jacobi..." << endl;
+	include "HBN/HBN_2DComp_RHS.edp";  /* Add matrix assembling */
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFRHSAssemblingNOPC)
+macro SFRHSAssemblingNOPC()
+	mpicout << " Assembling RHS..." << endl;
+	include "HBN/HBN_2DComp_RHSNOPC.edp";  /* Add RHS assembling */
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFMatLinAssemblingPCBCJacobi)
+macro SFMatLinAssemblingPCBCJacobi()
+	mpicout << " Assembling blocks matrices..." << endl;
+	include "HBN/HBN_2DComp_matLin.edp";  /* Add matrix assembling */
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFMatLinAssemblingNOPC)
+macro SFMatLinAssemblingNOPC()
+	mpicout << " Assembling big matrix..." << endl;
+	include "HBN/HBN_2DComp_matLinNOPC.edp";
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFFactorisationPCBCJacobi)
+macro SFFactorisationPCBCJacobi()
+{
+	mpicout << " LU-ing block matrices..." << endl;
+	include "HBN/HBN_2DComp_PCLU.edp";
+	mpicout << "Finished factorisation" << endl;
+}//EOM
+ENDIFMACRO
+
+IFMACRO(!SFFactorisationNOPC)
+macro SFFactorisationNOPC()
+{
+	mpicout << " LU-ing matrix..." << endl;
+	string ssparams = "nprow=1, npcol="+mpisize;
+	set(LinOp,solver=sparsesolver,master=-1);
+	mpicout << "Finished factorisation" << endl;
+}//EOM
+ENDIFMACRO
+
+IFMACRO(!SFLinSolvePCBCJacobi)
+macro SFLinSolvePCBCJacobi()
+	include "HBN/Macros_StabFem_PC.edp";
+	mpicout << "Solving linear system" << endl;
+	dSolution=0;
+	/* LinearGMRES(funcONE,precon=funcTWO,dSolution,RHS,verbosity=GMRESverbo); */
+	MPILinearGMRES(funcONE,precon=funcTWO,dSolution,RHS,nbiter=300, comm=comm, dimKrylov=100,verbosity=GMRESverbo);
+	mpicout << "Linear system solved" << endl;
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFLinSolveNOPC)
+macro SFLinSolveNOPC()
+	mpicout << "Solving linear system" << endl;
+	dSolution = LinOp^-1*RHS;
+	/* mpiReduce(dSolution, dSolution, processor(0, comm), mpiSUM); */
+	mpicout << "Linear system solved" << endl;
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFNewtonOutputNOPC)
+macro SFNewtonOutputNOPC()
+{
+	include "HBN/HBN_2DComp_Newton_outNOPC.edp";
+}
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFNewtonOutputPCBCJacobi)
+macro SFNewtonOutputPCBCJacobi()
+{
+	include "HBN/HBN_2DComp_Newton_out.edp";
+}
+// EOM	
+ENDIFMACRO
+
+
+IFMACRO(!SFNewtonIterControl)
+macro SFNewtonIterControl()
+	iter++;
+	if(u1cx[].l2<1e-6){dSolRelNorm = 1e30; dSolNorm = 1e30; };
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFNewtonFailed)
+macro SFNewtonFailed()
+	mpicout << "dSolution = " << dSolNorm << endl;
+	if(mpirank==0)
+	{
+		SFWriteBaseFlow(ffdatadir+"MeanFlow.ff2m",u0,"MeanFlow",iter);
+		SFWriteMode(ffdatadir+"HBMode1.ff2m",u1,1i*omega+sigma1,1i*omegaM+sigma1,"HarmonicMode",-1,1);
+		mpicout << endl << endl << "#####################################################################@" << endl << endl;
+		mpicout << " Newton Loop DIVERGED " << endl;	
+	}
+// EOM	
+ENDIFMACRO
+
+IFMACRO(!SFNewtonConverged)
+macro SFNewtonConverged()
+		include "HBN/HBN_2DComp_Newton_Converged.edp";
+// EOM	
+ENDIFMACRO	
+
+IFMACRO(!SFPostProcess)
+macro SFPostProcessMF()
+	if(mpirank==0)
+	{
+		ofstream file(ffdatadir+"MeanFlow.txt");
+		file << u0x[]; 
+		file << endl << endl << Re << " " << Ma;
+		SFWriteBaseFlow(ffdatadir+"MeanFlow.ff2m",u0,"MeanFlow",iter);
+	};
+// EOM	
+ENDIFMACRO
+	
+IFMACRO(!SFPostProcessHBMode)
+macro SFPostProcessHBMode(nmode,unc,uns)
+	defUU(u1) = [unc#x-1i*uns#x,unc#y-1i*uns#y,unc#p-1i*uns#p,unc#T-1i*uns#T,unc#rho-1i*uns#rho]; /* Asign complex for saving */
+	if(mpirank==0)
+	{
+	
+	 	ofstream file(ffdatadir+"HBMode"+nmode+".txt");
+	   	file << u1x[] ;	
+	   	file << endl << sigma1 << "   " << nmode*omega  << endl;
+		SFWriteMode(ffdatadir+"HBMode"+nmode+".ff2m",u1,nmode*1i*omega,nmode*1i*omega,"HarmonicMode",iter,nmode);
+	};
+// EOM	
+ENDIFMACRO
+	
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// In description, the blocks are called NxM, where N is the numering of the equation and M that of the unknown
+// N = 1 steady NS for MEAN flow ; N=2 real part of linear equation for eigenmode ; N = 3 imaginary part; N = 4 phase 
+// M = 1 MEAN-flow, M=2 eigenmode-real ; M = 3 eigenmode-imag ; M = 4 domega 
+//
+/////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5 : Reading files and parameters
+//
+
+include "HBN/HBN_2DComp_Parameters.edp";
+SFSpongeFunc;
+AMPFORCE=AmpSponge(Ma,xinfm,xinfv,yinf); // Definition of the sponge region
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 6 : Construction of HB RHS
+//
+
+include "HBN/HBN_2DComp_varfNLOps.edp";
+	
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 7 : Construction of HB Lin
+//
+
+include "HBN/HBN_2DComp_varfOps.edp";
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//plot(u1cx,fill=1,wait=1);
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 8 : Newton iteration and assembling of the system
+//
+
+int nDOFmesh = u0x[].n; // Number of points in the mesh
+real[int] dSolution((2*NModes+1)*XXxxxH.ndof+1); // Update of the newton solution
+
+while(SFNewtonCondition)
+{ 
+	SFNewtonIterOutput;
+	if(PCtype=="none")
+	{
+		mpicout << "No preconditioning " << endl;	
+		SFMatLinAssemblingNOPC;
+		/* matrix LinOp((2*NModes+1)*XXxxxHG.ndof+1,(2*NModes+1)*XXxxxHG.ndof+1);
+		 mpiAllReduce(LinOpLoc,LinOp,mpiCommWorld,mpiSUM); */
+		SFFactorisationNOPC;
+		for (int miter=0; miter < mOrder; miter++)
+		{
+			SFRHSAssemblingNOPC;
+			SFLinSolveNOPC;	
+			SFNewtonOutputNOPC;
+			mpicout << "----Inner iteration number = " << (miter+1) << "----- Number of total iterations " << (1+miter+mOrder*(iter-1)) << endl;
+		}
+	}
+	else
+	{
+		mpicout << "Block Jacobi preconditioning " << endl;
+		SFMatLinAssemblingPCBCJacobi;
+		SFFactorisationPCBCJacobi;
+		for (int miter=0; miter < mOrder; miter++)
+		{
+			SFRHSAssemblingPCBCJacobi;
+			SFLinSolvePCBCJacobi;
+			SFNewtonOutputPCBCJacobi;
+			mpicout << "----Inner iteration number = " << (miter+1) << "----- Number of total iterations " << (1+miter+mOrder*(iter-1)) << endl;
+		}
+	}
+	SFNewtonIterControl;
+};
+	
+
+if(dSolNorm>1e6) 
+{
+	SFNewtonFailed;
+}
+
+else
+{
+	include "HBN/HBN_2DComp_PostProcessing.edp";
+};
+
+	
+// END PROGRAM
+

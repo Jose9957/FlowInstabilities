@@ -1,0 +1,440 @@
+//
+//  PROGRAM WeaklyNonLinear_2D.edp
+//	
+//	Solves directly the Harmonic-Balance equations to decribe the limit cycle with two time-Fourier modes
+//   
+//
+//  INPUT PARAMETERS : 
+//      Normalization  (L, E or V)
+//      AdjointType (cA or dA)
+//      Re (Reynolds to build expansion)
+//
+//	INPUT FILES :
+//		BaseFlow.txt	
+//    EigenMode.txt
+//		EigenModeA.txt 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//      WNL.ff2m 
+//      HBMode1_guess.ff2m/.txt
+//      HBMode2_guess.ff2m/.txt
+//
+// 	ERROR MANAGEMENT : 
+//      if Newton iteration diverges, SelfConsistentMode.txt is not generated and "iter" parameter in Eigenmode.ff2m is -1.
+//
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		0 : Headers (Include/load & global macros)		
+//
+
+include "StabFem.idp";
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		1 : Definition of parameters		
+//
+
+IFMACRO(!Pk) 
+macro Pk [P2,P2,P1] //FEspace for pressure 
+macro Pkstring() "P2P2P1" //
+ENDIFMACRO
+int sym = -1;// to be done better someday
+
+string symmetryBaseFlow;
+string symmetry, symmetryEVEN, symmetryODD;
+string normalisation;
+real Recheck, Re, ReC, epsilonTT, Omegax, omegaC, omegaNL, sigmaC;
+real nu; 
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		2 : Defintion of FEM spaces (lecture of mesh)		
+//
+
+mesh th=readmesh(ffdatadir+"mesh.msh");
+
+fespace Xh(th,P2);             ////// f.e. space for vel.
+fespace Mh(th,P1);            ////// f.e. space for pressure
+fespace XXMh(th,[P2,P2,P1]); ////// f.e. space for triplet [u,v,p]
+
+XXMh [ubx,uby,ubp]; // base flow 
+XXMh<complex> [u1x,u1y,u1p];    // eigenmode 
+XXMh<complex> [u1Cx,u1Cy,u1Cp];    // eigenmode conjugate   
+XXMh<complex> [u1Ax,u1Ay,u1Ap];    // Adjoint   
+XXMh<complex> [u1ACx,u1ACy,u1ACp];    // Conjugate of Adjoint  
+
+XXMh [uepsx,uepsy,uepsp]; // base flow correction
+XXMh<complex> [u20x,u20y,u20p], [u22x,u22y,u22p];  // terms |A|^2 and A^2
+
+XXMh [vx,vy,vp]; // test functions
+XXMh<complex> [vCx,vCy,vCp]; // test functions 
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		3 : Customizable macros 	
+//
+//
+
+IFMACRO(!SFParameters)
+macro SFParameters()
+    include "getARGV.idp"
+	cout << " Choose the normalisation method ( V = Velocity at on point (S&L) ; E = Energy (Mantic-lugo), L = lift force ) : " << endl;
+	normalisation = getARGV("-Normalisation","V");
+	cout << "Estimated Reynolds to generate a guess for HarmonicBalance (-1) " << endl;
+	Recheck = getARGV("-Reguess",-1.0);
+	cout << " Symmetry of the mode (S - Symmetric, A - Antisymmetric, N - None): " << endl;
+	symmetry = getARGV("-symmetry","A");
+	cout << " Symmetry of the base flow (S - Symmetric, A - Antisymmetric, N - None): " << endl;
+	symmetryBaseFlow = getARGV("-symmetryBaseFlow","S");
+    /* Symmetry of modes */
+    if(symmetry=="A") { symmetryODD="A" ; symmetryEVEN = "S";};
+    if(symmetry=="S") { symmetryODD="S" ; symmetryEVEN = "S";};
+    if(symmetry=="N") { symmetryODD="N" ; symmetryEVEN = "N";};
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFReadInputFiles)
+macro SFReadInputFiles()
+{
+    ifstream cbin(ffdatadir+"BaseFlow.txt");
+    cbin >> ubx[] >> Re >> Omegax ;
+    cout << "Drag of guess mean flow : " << Drag(ub,symmetryBaseFlow) << endl;
+}
+epsilonTT = sqrt(1/Re-1/Recheck); /* warning may fail if subcritical ! to be fixed in due time */
+
+{
+cout << "Reading Eigenmode.txt" << endl;
+ifstream cbin(ffdatadir+"Eigenmode.txt");
+cbin >> u1x[]  >> sigmaC >> omegaC; 
+}
+
+{
+cout << "Reading EigenmodeA.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeA.txt");
+cbin >> u1Ax[]; 
+} // EOM
+ENDIFMACRO
+
+IFMACRO(!SFNormalisation)
+macro SFNormalisation()
+if(normalisation=="none")
+{ cout << " -> No normalization for the mode " << endl;}
+else if(normalisation=="L")
+{
+        cout << " -> Normalisation of mode based on LIFT  " << endl;
+        real Liftguess = 0.5; /* normalize so that lift is 0.5 ; total lift (including cc) is 1 ; lift coef. is .5 */
+        
+        cout << "  -> Fy = " << Liftguess  << endl;
+        cout << "Fy before renarmalisation : " << Lift(u1,symmetryODD) << endl;
+        complex modenorm = Lift(u1,symmetryODD);
+        u1x[] = Liftguess/modenorm*u1x[]; 
+        cout << "Fy after renarmalisation : " << Lift(u1,symmetryODD) << endl;    
+}   
+else if(normalisation=="E")
+{
+        cout << " -> Normalisation of mode based on ENERGY OF PERTURBATION (Mantic-lugo convention)  " << endl;
+        real Eguess = 1.0;
+        cout << "  -> Energy = " << Eguess << endl;
+        real EnergyEV = EnergyNorm(u1,symmetryODD);
+        cout << "Energy before renormalisation : " << EnergyEV << endl;
+        complex modenorm = Lift(u1,symmetryODD);
+        u1x[] = 1.0/modenorm*u1x[]; /* first normalize so that imag part of lift is zero */
+        modenorm = EnergyNorm(u1,symmetryODD);
+        u1x[] = Eguess/modenorm*u1x[]; /* then normalize so that || ums ||_L2 = 1/sqrt(2) */
+        EnergyEV = EnergyNorm(u1,symmetryODD);
+        cout << "Energy after renormalisation : " <<  EnergyEV << endl;  
+}
+else if(normalisation=="V")
+{
+    cout << " -> Normalisation of mode based on velocity at one point (Sipp & lebedev convention)  " << endl;
+    complex Vpoint = u1y(1,0); /* convention of Sipp & Lebedev */
+    real EnergyEV = EnergyNorm(u1,symmetryODD);
+    cout << "Energy before renormalisation : " << EnergyEV << endl;
+    complex modenorm = Lift(u1,symmetryODD);
+    u1x[] = 0.4612/Vpoint*u1x[];
+    EnergyEV = EnergyNorm(u1,symmetryODD);
+    cout << "Energy before renormalisation : " << EnergyEV << endl;
+};
+// EOM
+ENDIFMACRO
+
+IFMACRO(!SFWriteModeWNL)
+macro SFWriteModeWNL(namefile,u,ev,shift,typeFlow,symmetry)
+{
+		 ofstream file(namefile);
+   		 fespace p1forff2m(th,P1);fespace p2forff2m(th,P2);  
+         p1forff2m<complex> vort1;  		 
+ 		 file << "### Data generated by Freefem++ ; " << endl;
+    	 file << "Eigenmode for a 2D-incompressible problem " << endl;
+    	 file << "datatype " << typeFlow << " datastoragemode CxP2P2P1.2 datadescriptors ux,uy,p,sigmaHB,omegaHB" << endl;
+    	 string descriptionFF;
+    	 descriptionFF= "real* Re complex* lambda P1c vort complex Fy complex Fx real AEnergy";
+	     file << descriptionFF << endl << endl ; 
+		 file << Re  << endl << real(ev) << endl << imag(ev) << endl << endl;
+		 for (int j=0;j<vort1[].n ; j++) file << real(vort1[][j]) << endl << imag(vort1[][j]) << endl;
+		 file << endl;
+         complex LiftMode = Lift(u,symmetry); 
+         complex DragMode = Drag(u,symmetry);
+         real AEnergyMode = EnergyNorm(u,symmetry); /* sqrt(2) to pass to (sin/cos) components */
+         file << real(LiftMode) << endl << imag(LiftMode) << endl;
+         file << real(DragMode) << endl << imag(DragMode) << endl;
+		 cout << "#### customisable output for a mode in the WAKE OF A 2D BLUFF BODY : " << endl;
+         cout << "#   Fy = " << LiftMode << " exp( lambda t) + c.c. " << endl;
+         cout << "#   Fx = " << DragMode << " exp( lambda t) + c.c. " << endl;  
+		 cout << "#   Amplitude (with definition of Mantic-Lugo) = " << AEnergyMode << endl;
+		 file << AEnergyMode << endl;
+};
+// EOM
+ ENDIFMACRO 
+
+IFMACRO(!SFWriteStructureWNL)
+macro SFWriteStructureWNL(namefile,u,omegaCrit,typeData)
+{
+         real EnergyMode1 = EnergyNorm(u,symmetryODD);
+         ofstream file(ffdatadir+namefile);
+         file << "### Data generated by Freefem++ ; " << endl;
+         file << "Coefficients of the Amplitude Equation obtained by Weakly Non Linear analysis" << endl;
+         file << "datatype "+typeData << endl;
+         file << "real Rec real omegaC complex Lambda complex nu0 complex nu2 real AEnergy complex FyA1" 
+              << " real Fx0 real Fxeps2 real FxA20 complex FxA22"  ; 
+
+		 file << " complex eigenvalue real Aeps complex Fyeps " << endl << endl ; 
+		 /* These ones were removed by Javier and reintroduced by David */
+                   
+              
+         file << Re << endl 
+              << omegaCrit  << endl 
+              << real(Lambda) << endl << imag(Lambda) << endl 
+              << real(Nu0) << endl << imag(Nu0) << endl 
+              << real(Nu2) << endl << imag(Nu2) <<  endl 
+              << EnergyMode1 << endl
+              << real(FyA1) << endl << imag(FyA1) << endl
+              << Fx0 << endl 
+              << Fxeps2 << endl
+              << FxA20 << endl  
+              << endl << real(FxA22) << endl << imag(FxA22) << endl;
+         file << 0. << endl << omegaC  << endl 
+              << AAA*sqrt(2*int2d(th)(abs(u1x)^2+abs(u1y)^2)) << endl
+			  << real(AAA*FyA1) << " " << imag(AAA*FyA1) << endl;
+              
+};
+// EOM
+ENDIFMACRO
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		4 : Definition of problem
+//
+
+macro div(u) (dx(u#x)+dy(u#y)) // EOM macro for divergence 
+
+macro Conv(ua,ub,v) 
+( 
+	  ((ua#x*dx(ub#x)+ua#y*dy(ub#x))+(ub#x*dx(ua#x)+ub#y*dy(ua#x)))*v#x 
+	+ ((ua#x*dx(ub#y)+ua#y*dy(ub#y))+(ub#x*dx(ua#y)+ub#y*dy(ua#y)))*v#y 
+) // EOM macro for mutual convection operator
+
+macro D(u) [[dx(u#x), .5*(dx(u#y)+dy(u#x))], [.5*(dx(u#y)+dy(u#x)), dy(u#y)]] 
+// EOM macro for rate-of-deformation tensor
+
+macro NS(nu,u,v) 
+(
+	 -2*nu*(D(u):D(v))
+	+ u#p*div(v)
+	+ v#p*div(u)
+	- .5*Conv(u,u,v)
+)
+// EOM
+     
+macro NSL(nu,U,u,v) 
+(
+	-2*nu*(D(u):D(v))
+	+ u#p*div(v)
+	+ div(u)*v#p
+	- Conv(U,u,v)
+)
+// EOM
+        
+macro Boundaryconditions(u,v,symmetry)
+  on(1,u#x=0.0,u#y=0.0) 
++ on(2,21,22,23,u#x=0.0,u#y=0.0)
++ int1d(th,6)(u#x*v#x*1e30*(symmetry=="A")+u#y*v#y*1e30*(symmetry=="S"))
+// EOM
+
+macro Drag(u,symmetry)   
+(
+	(1.0*(symmetry=="N")+2.0*(symmetry=="S"))
+	*(
+	int1d(th,2,21,22,23)(u#p*N.x)
+	-nu*int1d(th,2,21,22,23)( (2.0*dx(u#x)*N.x+(dx(u#y)+dy(u#x))*N.y))
+	)
+)
+//EOM
+
+macro DdragDnu(u,symmetry)   
+(
+    (1.0*(symmetry=="N")+2.0*(symmetry=="S"))
+    *(
+    -int1d(th,2,21,22,23)( (2.0*dx(u#x)*N.x+(dx(u#y)+dy(u#x))*N.y))
+    )
+)
+//EOM
+	
+macro Lift(u,symmetry)   
+(
+	(1.0*(symmetry=="N")+2.0*(symmetry=="A"))
+	*(
+	int1d(th,2,21,22,23)(u#p*N.y)
+	-nu*int1d(th,2,21,22,23)( (2.0*dy(u#y)*N.y+(dx(u#y)+dy(u#x))*N.x))
+	)
+)
+//EOM
+
+
+macro EnergyNorm(u,symm) sqrt( int2d(th)(  (1.0+1.0*(symm!="N"))*( abs(u#x)^2+abs(u#y)^2) )  ); 
+// "Energy" norm for a complex field 
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+     
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		5 : Reading files and parameters
+//
+
+SFParameters
+SFReadInputFiles
+SFNormalisation
+
+u1ACx[] = conj(u1Ax[]);
+u1Cx[] = conj(u1x[]);
+nu = 1/Re;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//      6 : Resolution
+//
+
+cout << " Solving problems at order 2 :" << endl;
+
+solve varfEpsilon([uepsx,uepsy,uepsp],[vx,vy,vp]) =
+  	 int2d(th)( NSL(nu,ub,ueps,v) )
+	+ int2d(th) (2*(D(ub):D(v))) 
+    + Boundaryconditions(ueps,v,"S")			
+	;
+	
+solve varf20([u20x,u20y,u20p],[vCx,vCy,vCp]) =
+  	 int2d(th)( NSL(nu,ub,u20,vC) )
+	- int2d(th)( Conv(u1,u1C,vC) ) 
+    + Boundaryconditions(u20,vC,"S")			
+	;
+	
+solve varf22([u22x,u22y,u22p],[vCx,vCy,vCp]) =
+  	 int2d(th)( NSL(nu,ub,u22,vC) ) -int2d(th)(2i*omegaC*(u22x*vCx+u22y*vCy) )
+	- int2d(th)(.5*Conv(u1,u1,vC) ) 
+    + Boundaryconditions(u22,vC,"S")			
+	;
+
+/////////////////////////////////////////////////////////////////////////////////
+/////// ORDER 3
+cout << " Computing coeffs at order 3 :" << endl;
+
+complex Cn;
+Cn = int2d(th)(u1ACx*u1x+u1ACy*u1y);
+cout << " Inner product direct-adjoint : " << Cn << endl;
+
+complex Lambda = -1/Cn*int2d(th)(Conv(ueps,u1,u1AC)-2*(D(u1):D(u1AC)));
+complex Nu0 = 1/Cn*int2d(th)(Conv(u20,u1,u1AC));
+complex Nu2 = 1/Cn*int2d(th)(Conv(u22,u1C,u1AC));
+real AEnergy = EnergyNorm(u1,symmetryODD);
+real Fx0 = Drag(ub,symmetryBaseFlow);
+real Fxeps2 = ( Drag(ueps,symmetryBaseFlow)- DdragDnu(ub,symmetryBaseFlow) );
+real FxA20 = real(  Drag(u20,symmetryEVEN) );
+complex FxA22 = Drag(u22,symmetryEVEN);
+complex FyA1 = Lift(u1,symmetryODD);
+real AAA = sqrt(abs(real(Lambda)/real(Nu0+Nu2))); /// amplitude/sqrt(eps) ; value depends on normalisation choice
+omegaNL = omegaC+(imag(Lambda) - imag(Nu0+Nu2)*AAA^2)*epsilonTT^2;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+
+
+
+//// GENERATE FILE WITH ALL COEFFS ; USEFUL FOR MATLAB DRIVER
+
+SFWriteStructureWNL("WNL_results.ff2m",u1,omegaC,"WNL")
+
+
+//////// GENERATE "GUESS FILES" for Self-consistent computation -> OBSOLETE ?
+if(Recheck>0)
+{
+XXMh [umx,umy,ump]; // mean flow
+Re = Recheck;
+
+{
+	ofstream file(ffdatadir+"MeanFlow_guess.txt");
+    umx[] = ubx[]+epsilonTT^2*uepsx[];
+	[umx,umy,ump]=[umx,umy,ump]+AAA^2*epsilonTT^2*[real(u20x),real(u20y),real(u20p)];
+	file << umx[]; 
+	file << Re << endl << 0 << endl;
+}; 
+SFWriteBaseFlow(ffdatadir+"MeanFlow_guess.ff2m",um,"MeanFlow",1);
+
+
+
+[u1x,u1y,u1p] = 2*AAA*epsilonTT*[u1x,u1y,u1p]; // factor 2 because (cos, sin) components instead of (re,im)
+{
+ 	ofstream file(ffdatadir+"HBMode1_guess.txt");
+   	file << u1x[] ;	
+   	file <<  endl << 0 << endl << omegaC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"HBMode1_guess.ff2m",u1,1i*omegaNL,1i*omegaC,"HarmonicMode",symmetryODD);
+
+	cout << 2*AAA^2*epsilonTT^2 << endl;
+	u22x[] = 2*AAA^2*epsilonTT^2*u22x[]; // factor 2 because (cos, sin) components instead of (re,im)
+{
+ 	ofstream file(ffdatadir+"HBMode2_guess.txt");
+   	file << u22x[] ;	
+   	file <<  endl  << 0 << endl << 2*omegaC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"HBMode2_guess.ff2m",u22,2i*omegaNL,2i*omegaC,"SecondHarmonicMode",symmetryEVEN);
+
+};
+
+	
+	
+	

@@ -1,0 +1,1514 @@
+//
+//  PROGRAM WeaklyNonLinear_Axi_Hopf-Steady_O2.edp
+//  
+//  Determines the normal form coefficients of a non-resonant Hopf-Hopf bifurcation without symmetry considerations
+//   
+//  TODO: DOCUMENTATION
+//  INPUT PARAMETERS : 
+//      Normalization  (L, E or V)
+//      Azimuthal wavenumber A -- mModeA (int) (Default: 0)
+//      Azimuthal wavenumber B -- mModeB (int) (Default: 0)
+//      Azimuthal wavenumber C -- mModeC (int) (Default: 0)
+//
+//  INPUT FILES :
+//
+//    BaseFlow.txt  (It should contain the 3 parameters used for the expansion)
+//      Param 1 (Default: Re -- Reynolds number)
+//      Param 2 (Default: Pr -- Prandtl number)
+//      Param 3 (Default: Ri -- Richardson number)
+//    Eigenmode structures. They should contain the eigenvalue at the end of the file (real & imag parts)
+//    EigenMode.txt
+//    EigenModeA.txt 
+//    EigenmodeModeB.txt
+//    EigenmodeAModeB.txt
+//    EigenmodeModeC.txt
+//    EigenmodeAModeC.txt
+//
+//    mesh.msh      ->  mesh in Freefem format
+//
+//  OUTPUT FILES :
+//      WNL.ff2m 
+//      MeanFlow_guess.ff2m / .txt
+//      HBMode1_guess.ff2m / .txt
+//      HBMode2_guess.ff2m / .txt
+//      HBMode3_guess.ff2m / .txt
+//      ... 
+//
+//  ERROR MANAGEMENT : 
+//      TODO
+//
+
+/* 
+    TODO: Integration with SF_WNL, test of capabilities. Validation of the normal form. 
+    Validation. 1) Verify the symmetry of some coefficients. 2) Verify sensitivity of BF w.r..t. parameters.
+                3) Check qualitatively the validation of predictions w.r.t. data reported by JFM (Dusek 2009)
+*/
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    0 : Headers (Include/load & global macros)    
+//
+
+include "StabFem.idp";
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    1 : Definition of parameters    
+//
+
+string normalisation;
+real Re, ReC, Remode; // Reynolds number
+real Pr, PrC, Prmode; // Prandtl number 
+real Ri, RiC, Rimode; // Richardson number
+real nu; // Dynamic viscosity
+real kappa_visc; // Inverse of the Prandtl number
+real sigmaCModeA, sigmaCModeB,omegaCModeA, omegaCModeB, omegaCModeC, omegaCModeC; // Eigenvalues (real and imaginary part of each mode)
+complex lambdaCModeA, lambdaCModeB, lambdaCModeC; // Eigenvalues in complex notation
+
+// Paramters for input
+int mModeA, mModeB, mModeC; // Azimuthal modes of linear (order 1) modes
+
+// Define the macros for the first and second parameter of the normal form
+IFMACRO(!Param1)
+macro Param1() nu // EOM
+ENDIFMACRO
+
+IFMACRO(!Param2)
+macro Param2() kappa_visc // EOM
+ENDIFMACRO
+
+IFMACRO(!Param3)
+macro Param3() Ri // EOM
+ENDIFMACRO
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    2 : Defintion of FEM spaces (lecture of mesh)   
+//
+
+mesh th=readmesh(ffdatadir+"mesh.msh");
+macro fespaceLocal() XXXxxh // EOM
+func Pk = [P2, P2, P2, P1, P1];
+
+fespace Xh(th,P2);             ////// f.e. space for vel.
+fespace xh(th,P1);            ////// f.e. space for pressure
+fespace fespaceLocal(th,Pk); ////// f.e. space for triplet [u,v,w,p,T]
+
+macro defUU(u)[u#x,u#r,u#phi,u#p,u#T]//EOF  
+
+// BASE-FLOW DEFINITION 
+
+fespaceLocal defUU(ub); // base flow 
+
+// DEFINITION OF FIELDS ASSOCIATED TO THE BASEFLOW VARIATION w.r.t. to parameters
+
+// Order 2
+fespaceLocal<complex> defUU(uModeepsParam1), defUU(uModeepsParam2), defUU(uModeepsParam3);
+
+
+// DEFINITION OF FIELDS ASSOCIATED TO THE FIRST MODE (ModeA)
+
+// Order 1
+fespaceLocal<complex> defUU(uModeA1);    // eigenmode 
+fespaceLocal<complex> defUU(uModeA1con);    // eigenmode conjugate   
+fespaceLocal<complex> defUU(uModeA1A);    // Adjoint   
+fespaceLocal<complex> defUU(uModeA1Acon);    // Conjugate of Adjoint  
+
+// Order 2
+fespaceLocal<complex> defUU(uModeA20), defUU(uModeA22), defUU(uModeA22con);  // terms |A|^2 and A^2
+
+// DEFINITION OF FIELDS ASSOCIATED TO THE SECOND MODE (ModeB)
+
+// Order 1
+fespaceLocal<complex> defUU(uModeB1);    // eigenmode 
+fespaceLocal<complex> defUU(uModeB1con);    // eigenmode conjugate   
+fespaceLocal<complex> defUU(uModeB1A);    // Adjoint   
+fespaceLocal<complex> defUU(uModeB1Acon);    // Conjugate of Adjoint  
+
+// Order 2
+fespaceLocal<complex> defUU(uModeB20), defUU(uModeB22), defUU(uModeB22con);  // terms |A|^2 and A^2
+
+
+// DEFINITION OF FIELDS ASSOCIATED TO THE THIRD MODE (ModeC)
+
+// Order 1
+fespaceLocal<complex> defUU(uModeC1);    // eigenmode 
+fespaceLocal<complex> defUU(uModeC1con);    // eigenmode conjugate   
+fespaceLocal<complex> defUU(uModeC1A);    // Adjoint   
+fespaceLocal<complex> defUU(uModeC1Acon);    // Conjugate of Adjoint  
+
+// Order 2
+fespaceLocal<complex> defUU(uModeC20), defUU(uModeC22), defUU(uModeC22con);  // terms |A|^2 and A^2
+
+
+// DEFINITION OF FIELDS ASSOCIATED TO THE Cross-Products of modes
+
+// Order 2
+/* Notation style. In the following:
+                                     - ModeAModeBcon denotes A*conj(B)
+                                     - ModeAModeBconj denotes conj(A*B)
+   Otherwise, conjugates are denoted with the subscript con
+*/
+fespaceLocal<complex> defUU(uModeAModeB), defUU(uModeAModeBconj), defUU(uModeAModeBcon), defUU(uModeAModeBconconj);  // terms AB, A(BConj) and c.c.
+fespaceLocal<complex> defUU(uModeAModeC), defUU(uModeAModeCconj), defUU(uModeAModeCcon), defUU(uModeAModeCconconj);  // terms AC, A(CConj) and c.c.
+fespaceLocal<complex> defUU(uModeBModeC), defUU(uModeBModeCconj), defUU(uModeBModeCcon), defUU(uModeBModeCconconj);  // terms BC, B(CConj) and c.c.
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    3 : Customizable macros   
+//
+//
+
+IFMACRO(!SFParameters)
+macro SFParameters()
+  include "getARGV.idp"
+  normalisation = getARGV("-Normalisation","E");
+  mModeA = getARGV("-mModeA",0);
+  mModeB = getARGV("-mModeB",0);
+  mModeC = getARGV("-mModeC",0);
+  cout << " Normalisation method ( E = Energy (Mantic-lugo), L = lift force ) : " << normalisation << endl;
+  cout << " Azimuthal Mode of the first mode (Mode A): " << mModeA << endl;
+  cout << " Azimuthal Mode of the second mode (Mode B): " << mModeB  << endl;
+  cout << " Azimuthal Mode of the third mode (Mode C): " << mModeB  << endl;
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFReadInputFiles)
+macro SFReadInputFiles()
+
+/******************** READING BASEFLOW  *****************/
+{
+    ifstream cbin(ffdatadir+"BaseFlow.txt");
+    cbin >> ubx[] >> Re >> Pr >> Ri;
+    /* Critical Reynolds from the steady-state */
+    ReC=Re; PrC=Pr; RiC=Ri;
+    /* Update nu */
+    nu = 1/Re;
+    kappa_visc = 1/Pr;
+    IFMACRO(CUSTOMnu)
+        nu = CUSTOMnu;
+    ENDIFMACRO
+    /* End update nu */
+    cout << "Reading  mean flow for Param1: " << Param1 << " Param2: " << Param2 << " Param3: " << Param3 << endl;
+    cout << "Lift of mean flow: "  << Lift(ub) << endl;
+    cout << "Drag of  mean flow: " << Drag(ub) << endl;
+}
+/******************** END BASEFLOW  **********************/
+
+/******************** READING MODE A  *****************/
+{
+cout << "Reading Eigenmode.txt" << endl;
+ifstream cbin(ffdatadir+"Eigenmode.txt");
+cbin >> uModeA1x[]  >> Remode >> sigmaCModeA >> omegaCModeA;
+lambdaCModeA = sigmaCModeA + 1i*omegaCModeA; 
+cout << " lambdaC mode A = " << lambdaCModeA << endl;
+}
+
+{
+cout << "Reading EigenmodeA.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeA.txt");
+cbin >> uModeA1Ax[]; 
+}
+/******************** END MODE A  **********************/
+
+/******************** READING MODE B  *****************/
+{
+cout << "Reading EigenmodeModeB.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeModeB.txt");
+cbin >> uModeB1x[] >> Remode >> sigmaCModeB >> omegaCModeB; 
+lambdaCModeB = sigmaCModeB + 1i*omegaCModeB;
+cout << " lambdaC mode B = " << lambdaCModeB << endl;
+
+}
+
+{
+cout << "Reading EigenmodeAModeB.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeAModeB.txt");
+cbin >> uModeB1Ax[]; 
+}
+/******************** END MODE B  **********************/
+
+/******************** READING MODE C  *****************/
+{
+cout << "Reading EigenmodeModeC.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeModeC.txt");
+cbin >> uModeC1x[] >> Remode >> sigmaCModeC >> omegaCModeC; 
+lambdaCModeC = sigmaCModeC + 1i*omegaCModeC;
+cout << " lambdaC mode C = " << lambdaCModeC << endl;
+}
+
+{
+cout << "Reading EigenmodeAModeC.txt" << endl;
+ifstream cbin(ffdatadir+"EigenmodeAModeC.txt");
+cbin >> uModeC1Ax[]; 
+}
+/******************** END MODE C  **********************/
+ // EOM
+ENDIFMACRO
+
+
+IFMACRO(!SFNormalisation)
+macro SFNormalisation()
+if(normalisation=="none")
+{ cout << " -> No normalization for the mode " << endl;}
+else if(normalisation=="L")
+{
+        cout << " -> Normalisation of mode based on LIFT  " << endl;
+        real Liftguess = 0.5; /* normalize so that lift is 0.5 ; total lift (including cc) is 1 ; lift coef. is .5 */
+        cout << "  -> Fy = " << Liftguess  << endl;
+        cout << "Fy of Mode A : " << Lift(uModeA1) << endl;
+        cout << "Fy of Mode B : " << Lift(uModeB1) << endl;
+        cout << "Fy of Mode C : " << Lift(uModeC1) << endl;
+        complex modenorm = Lift(uModeA1);
+        uModeA1x[] = Liftguess/modenorm*uModeA1x[]; 
+        modenorm = Lift(uModeB1);
+        uModeB1x[] = Liftguess/modenorm*uModeB1x[]; 
+        modenorm = Lift(uModeC1);
+        uModeC1x[] = Liftguess/modenorm*uModeC1x[]; 
+        cout << " --- AFTER NORMALIZATION --- " << endl;
+        cout << "Fy of Mode A : " << Lift(uModeA1) << endl;
+        cout << "Fy of Mode B : " << Lift(uModeB1) << endl;   
+        cout << "Fy of Mode C : " << Lift(uModeC1) << endl;    
+ 
+}   
+else if(normalisation=="E")
+{
+        cout << " -> Normalisation of mode based on ENERGY OF PERTURBATION " << endl;
+        real Eguess = 1;
+        cout << "  -> Energy = " << Eguess << endl;
+        /* Make real positive */
+        /* Fix the the mode to be real */
+        real Liftguess = 0.5;
+        complex modenorm = LiftTest(uModeA1);
+        real EnergyModeB = EnergyNorm(uModeB1) ;
+        cout << "  -> Energy of Mode B = " << EnergyModeB << endl;
+        uModeA1x[] = Liftguess/modenorm*uModeA1x[]; 
+        modenorm = LiftTest(uModeB1);
+        uModeB1x[] = Liftguess/modenorm*uModeB1x[]; 
+        modenorm = LiftTest(uModeC1);
+        uModeC1x[] = Liftguess/modenorm*uModeC1x[]; 
+        /* Normalize energy to one */
+        real EnergyEV = EnergyNorm(uModeA1);
+        uModeA1x[] = Eguess/EnergyEV*uModeA1x[]; /* first normalize so that imag part of lift is zero */
+        EnergyEV = EnergyNorm(uModeB1);
+        uModeB1x[] = Eguess/EnergyEV*uModeB1x[]; /* then normalize so that || ums ||_L2 = 1/sqrt(2) */
+        EnergyEV = EnergyNorm(uModeC1);
+        uModeC1x[] = Eguess/EnergyEV*uModeC1x[]; /* then normalize so that || ums ||_L2 = 1/sqrt(2) */
+
+        cout << " --- AFTER NORMALIZATION --- " << endl;
+        EnergyEV = EnergyNorm(uModeA1);
+        cout << "Energy of Mode A : " << EnergyEV << endl;
+        EnergyEV = EnergyNorm(uModeB1);
+        cout << "Energy of Mode B : " << EnergyEV << endl;    
+        EnergyEV = EnergyNorm(uModeC1);
+        cout << "Energy of Mode C : " << EnergyEV << endl;    
+}
+
+// EOM
+ENDIFMACRO
+
+IFMACRO(!SFConjugateDeclare)
+macro SFConjugateDeclare()
+uModeA1conx[] = conj(uModeA1x[]);
+uModeA1Aconx[] = conj(uModeA1Ax[]);
+uModeB1conx[] = conj(uModeB1x[]);
+uModeB1Aconx[] = conj(uModeB1Ax[]);
+uModeC1conx[] = conj(uModeC1x[]);
+uModeC1Aconx[] = conj(uModeC1Ax[]);
+//EOM
+ENDIFMACRO
+
+IFMACRO(!SFNormalisationAdj)
+macro SFNormalisationAdj()
+
+complex NormalizationModeA,NormalizationModeB;
+NormalizationModeA = int2d(th)(y*InnerProduct(uModeA1Acon,uModeA1));
+NormalizationModeB = int2d(th)(y*InnerProduct(uModeB1Acon,uModeB1));
+NormalizationModeC = int2d(th)(y*InnerProduct(uModeC1Acon,uModeC1));
+cout << " Inner product direct-adjoint ModeA : " << NormalizationModeA << endl;
+cout << " Inner product direct-adjoint ModeB : " << NormalizationModeB << endl;
+cout << " Inner product direct-adjoint ModeC : " << NormalizationModeC << endl;
+uModeA1Ax[] = uModeA1Ax[]/conj(NormalizationModeA);
+uModeB1Ax[] = uModeB1Ax[]/conj(NormalizationModeB);
+uModeC1Ax[] = uModeC1Ax[]/conj(NormalizationModeC);
+uModeA1Aconx[] = conj(uModeA1Ax[]);
+uModeB1Aconx[] = conj(uModeB1Ax[]);
+uModeC1Aconx[] = conj(uModeC1Ax[]);
+NormalizationModeA = int2d(th)(y*InnerProduct(uModeA1Acon,uModeA1));
+NormalizationModeB = int2d(th)(y*InnerProduct(uModeB1Acon,uModeB1));
+NormalizationModeC = int2d(th)(y*InnerProduct(uModeC1Acon,uModeC1));
+cout << "After - Inner product direct-adjoint ModeA : " << NormalizationModeA << endl;
+cout << "After - Inner product direct-adjoint ModeB : " << NormalizationModeB << endl;
+cout << "After - Inner product direct-adjoint ModeC : " << NormalizationModeC << endl;
+  // EOM
+ENDIFMACRO
+
+IFMACRO(!SFWriteModeWNL)
+macro SFWriteModeWNL(namefile,u,typeFlow,mAzimuthal)
+{
+    ofstream file(namefile);
+    fespace p1forff2m(th,P1); fespace p2forff2m(th,P2);  
+    p2forff2m<complex> testvort,vortphi,vortx,vortr;      
+
+    solve calcvortphi(vortphi,testvort)=int2d(th)(  ( -dy(u#x) + dx(u#r) )*y*testvort) - int2d(th)( y*vortphi*testvort );
+    solve calcvortx(vortx,testvort)=int2d(th)(  (  y*dy(u#phi) + u#phi )*testvort    )-int2d(th)(y*vortx*testvort);
+    /*
+    solve calcvortr(vortx,testvort)=int2d(th)(  (1i*mAzimuthal*u#x - y*dx(u#phi) )*testvort  )-int2d(th)( y*vortr*testvort );
+*/
+    file << "### Data generated by Freefem++ ; " << endl;
+    file << " Mode from WNL of steady-Hopf with O(2) symmetry " << endl;
+    file << "datatype " << typeFlow << " datastoragemode CxP2P2P2P1P1.2 datadescriptors ux,ur,uphi,p,T,sigmaHB,omegaHB" << endl;
+    string descriptionFF;
+    descriptionFF= "real* Re P2c vortphi P2c vortx P2c vortr complex Fy complex Fx real AEnergy";
+    file << descriptionFF << endl << endl ; 
+    file << Re  << endl << endl;
+    for (int j=0;j<vortphi[].n ; j++) file << real(vortphi[][j]) << endl << imag(vortphi[][j]) << endl;
+    for (int j=0;j<vortx[].n ; j++) file << real(vortx[][j]) << endl << imag(vortx[][j]) << endl;
+    for (int j=0;j<vortr[].n ; j++) file << real(vortr[][j]) << endl << imag(vortr[][j]) << endl;
+    file << endl;
+    complex LiftMode = Lift(u); 
+    complex DragMode = Drag(u);
+    real AEnergyMode = EnergyNorm(u); /* sqrt(2) to pass to (sin/cos) components */
+    file << real(LiftMode) << endl << imag(LiftMode) << endl;
+    file << real(DragMode) << endl << imag(DragMode) << endl;
+    cout << "#   Fy = " << LiftMode << " exp( lambda t) + c.c. " << endl;
+    cout << "#   Fx = " << DragMode << " exp( lambda t) + c.c. " << endl;  
+    cout << "#   Amplitude (with definition of Mantic-Lugo) = " << AEnergyMode << endl;
+    file << AEnergyMode << endl;
+};
+// EOM
+ ENDIFMACRO 
+
+IFMACRO(!SFWriteStructureWNL)
+macro SFWriteStructureWNL(namefile,uA,uB,uC,omegaCA,omegaCB,omegaCC,typeData)
+{
+         real EnergyModeA = EnergyNorm(uA);
+         real EnergyModeB = EnergyNorm(uB);
+         real EnergyModeC = EnergyNorm(uC);
+
+         ofstream file(ffdatadir+namefile);
+         file << "### Data generated by Freefem++ ; " << endl;
+         file << "Coefficients of the Amplitude Equation obtained from a non-resonant Hopf-Hopf" << endl;
+         file << "datatype "+typeData << endl;
+         file << "real Rec real omegaCA real omegaCB complex omegaCC" 
+              << " complex aA00 complex aA01 complex aA10 complex aA11 complex aA20 complex aA21" 
+              << " complex aAAabs20 complex aAAabs21 complex aABabs20 complex aABabs21" 
+              << " complex aABabs22 complex aACabs20 complex aACabs21 complex aACabs22"
+              << " complex aAconBCcon20 complex aAconBCcon21 complex aAconBCcon22"
+              << " complex aB00 complex aB01 complex aB10 complex aB11 complex aB20 complex aB21"
+              << " complex aBAabs20 complex aBAabs21 complex aBAabs22 complex aBBabs20 complex aBBabs21" 
+              << " complex aBCabs20 complex aBCabs21 complex aBCabs22 complex aCA20 complex aCA21" 
+              << " complex aC00 complex aC01 complex aC10 complex aC11 complex aC20 complex aC21" 
+              << " complex aCAabs20 complex aCAabs21 complex aCAabs22 complex aCBabs20 complex aCBabs21" 
+              << " complex aCBabs22 complex aCCabs20 complex aCCabs21 complex aBconA20 complex aBconA21" 
+              
+         file << Re << endl 
+              << omegaCA  << endl 
+              << omegaCB  << endl 
+              << omegaCC  << endl
+
+              << real(aA00) << endl << imag(aA00) << endl 
+              << real(aA01) << endl << imag(aA01) << endl 
+              << real(aA10) << endl << imag(aA10) << endl 
+              << real(aA11) << endl << imag(aA11) << endl 
+              << real(aA20) << endl << imag(aA20) << endl 
+              << real(aA21) << endl << imag(aA21) << endl 
+              << real(aAAabs20) << endl << imag(aAAabs20) << endl 
+              << real(aAAabs21) << endl << imag(aAAabs21) << endl 
+              << real(aABabs20) << endl << imag(aABabs20) << endl 
+              << real(aABabs21) << endl << imag(aABabs21) << endl 
+              << real(aABabs22) << endl << imag(aABabs22) << endl 
+              << real(aACabs20) << endl << imag(aACabs20) << endl 
+              << real(aACabs21) << endl << imag(aACabs21) << endl 
+              << real(aACabs22) << endl << imag(aACabs22) << endl 
+              << real(aAconBCcon20) << endl << imag(aAconBCcon20) << endl 
+              << real(aAconBCcon21) << endl << imag(aAconBCcon21) << endl 
+              << real(aAconBCcon22) << endl << imag(aAconBCcon22) << endl 
+
+              << real(aB00) << endl << imag(aB00) << endl 
+              << real(aB01) << endl << imag(aB01) << endl 
+              << real(aB10) << endl << imag(aB10) << endl 
+              << real(aB11) << endl << imag(aB11) << endl 
+              << real(aB20) << endl << imag(aB20) << endl 
+              << real(aB21) << endl << imag(aB21) << endl 
+              << real(aBAabs20) << endl << imag(aBAabs20) << endl 
+              << real(aBAabs21) << endl << imag(aBAabs21) << endl 
+              << real(aBAabs22) << endl << imag(aBAabs22) << endl 
+              << real(aBBabs20) << endl << imag(aBBabs20) << endl 
+              << real(aBBabs21) << endl << imag(aBBabs21) << endl 
+              << real(aBCabs20) << endl << imag(aBCabs20) << endl 
+              << real(aBCabs21) << endl << imag(aBCabs21) << endl 
+              << real(aBCabs22) << endl << imag(aBCabs22) << endl 
+              << real(aCA20) << endl << imag(aCA20) << endl 
+              << real(aCA21) << endl << imag(aCA21) << endl 
+
+              << real(aC00) << endl << imag(aC00) << endl 
+              << real(aC01) << endl << imag(aC01) << endl 
+              << real(aC10) << endl << imag(aC10) << endl 
+              << real(aC11) << endl << imag(aC11) << endl 
+              << real(aC20) << endl << imag(aC20) << endl 
+              << real(aC21) << endl << imag(aC21) << endl 
+              << real(aCAabs20) << endl << imag(aCAabs21) << endl 
+              << real(aCAabs21) << endl << imag(aCAabs21) << endl 
+              << real(aCAabs22) << endl << imag(aCAabs22) << endl 
+              << real(aCBabs20) << endl << imag(aCBabs20) << endl 
+              << real(aCBabs21) << endl << imag(aCBabs21) << endl 
+              << real(aCBabs22) << endl << imag(aCBabs22) << endl 
+              << real(aCCabs20) << endl << imag(aCCabs20) << endl 
+              << real(aCCabs21) << endl << imag(aCCabs21) << endl 
+              << real(aBconA20) << endl << imag(aBconA20) << endl 
+              << real(aBconA21) << endl << imag(aBconA21) << endl ;
+              
+};
+// EOM
+ENDIFMACRO
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    4 : Definition of problem
+//
+
+//  Differential operators
+/* Macro for Divergence  */
+macro div(im,u) (dx(u#x)+dy(u#r)+u#r/y+im/y*u#phi)//EOM
+
+/* Macro for Velocity gradient tensor  */
+macro Grad(im,u) [
+    [dx(u#x), dy(u#x),  im/y*u#x ], 
+    [dx(u#r), dy(u#r),  im/y*u#r-u#phi/y],
+    [dx(u#phi), dy(u#phi),  im/y*u#phi+u#r/y ]
+    ]//EOM
+
+/* Convective term of the Temperature transport */
+macro ugradf(im,u,f)  ( u#x*dX(f) + u#r*dY(f) + im*u#z*f ) // EOM
+
+/* Inner product of gradient terms */
+macro gradgrad(imu,u,imv,v) (dX(u)*dX(v)+dY(u)*dY(v)+imu*imv*u*v) // EOM
+
+/* Macro for Rate-of-deformation tensor  */
+macro D(im,u) [ 
+      [dx(u#x),         .5*(dx(u#r)+dy(u#x)),       .5*(im/y*u#x+dx(u#phi)) ], 
+      [.5*(dx(u#r)+dy(u#x)),    dy(u#r),              .5*(im/y*u#r-u#phi/y+dy(u#phi))],
+      [.5*(im/y*u#x+dx(u#phi)), .5*(im/y*u#r-u#phi/y+dy(u#phi)),  im/y*u#phi+u#r/y]
+      ]//EOM
+
+/* Macro for Mutual convection operator  */
+macro Conv(ima,ua,imb,ub,v) 
+( [v#x,v#r,v#phi]'*(Grad(ima,ua)*[ub#x,ub#r,ub#phi] + Grad(imb,ub)*[ua#x,ua#r,ua#phi]) )//EOM 
+
+
+macro NSL(nu,U,u,v,mMode,lambdaMode) 
+(      
+         2*(1.0/ReC)*(D(1i*mMode,u):D(-1i*mMode,v))
+       - u#p*div(-1i*mMode,v) - RiC*u#T*v#x 
+       + Conv(1i*mMode,u,0,U,v)
+       - div(1i*mMode,u)*v#p
+       + v#T*ugradf(1i*mMode,U,u#T) + v#T*ugradf(0,u,U#T) 
+       + (1.0/(ReC*PrC))*gradgrad(1i*mMode,u#T,-1i*mMode,v#T)  
+       + lambdaMode*InnerProduct(u,v)
+)*y
+// EOM
+
+macro Boundaryconditions(u,v,m)
+    on(1,2,21,22,23,u#x=0,u#r=0.0,u#z=0.0,u#T=0.0)
+    + on(5,u#x=0.0)+on(4,u#r=0)
+    + int1d(th,6)((u#r*v#r+u#z*v#z)*1e30*(abs(m)!=1))
+    + int1d(th,6)((u#x*v#x+u#T*v#T)*1e30*(abs(m)>0)) 
+// EOM
+        
+/* BE CAREFUL DRAG AND LIF IN THE MERIDIONAL PLANE */
+
+macro Drag(u)   
+(
+  int1d(th,2,21,22,23)(y*u#p*N.x)
+  -nu*int1d(th,2,21,22,23)( y*(2.0*dx(u#x)*N.x+(dx(u#r)+dy(u#x))*N.y))  
+)
+//EOM
+
+macro DdragDnu(u)   
+(
+    -int1d(th,2,21,22,23)( y*(2.0*dx(u#x)*N.x+(dx(u#r)+dy(u#x))*N.y) )
+)
+//EOM
+  
+macro Lift(u)   
+(
+  int1d(th,2,21,22,23)(y*u#p*N.y)
+  -nu*int1d(th,2,21,22,23)( y*(2.0*dy(u#r)*N.y+(dx(u#r)+dy(u#x))*N.x))  
+)
+//EOM
+
+macro LiftTest(u)   
+(
+  int1d(th,1,2,21,22,23)(y*u#p*N.y)
+  -nu*int1d(th,1,2,21,22,23)( y*(2.0*dy(u#r)*N.y+(dx(u#r)+dy(u#x))*N.x)) 
+)
+//EOM
+
+/* "Energy" norm for a complex field */
+macro EnergyNorm(u) sqrt( int2d(th)( y*( abs(u#x)^2+abs(u#r)^2+abs(u#phi)^2) )  )
+// EOM
+
+/* "InnerProduct" norm for a complex field  */
+macro InnerProduct(u,v)   (u#x*v#x + u#r*v#r + u#phi*v#phi + u#T*v#T) 
+// EOM
+
+/* "InnerProductTotal" norm for a complex field  */
+macro InnerProductP(u,v) ((u#x*v#x + u#r*v#r + u#phi*v#phi + u#T*v#T))
+// EOM
+
+/* "F20Param1" term of q_20 of the first parameter (default: Re)  */
+macro F20Param1(u,mu,v,mv)
+(
+  int2d(th) ( y*(  2*(D(mu,u):D(mv,v)) + (1.0/(Pr))*gradgrad(1i*mu,u#T,1i*mv,v#T)  ) ) 
+)
+//EOM
+
+/* "F20Param2" term of q_20 of the second parameter (default: Pr)  */
+macro F20Param2(u,mu,v,mv)
+(
+  int2d(th) ( y*(  gradgrad(1i*mu,u#T,1i*mv,v#T)  )   )  
+)
+//EOM
+
+/* "F20Param3" term of q_20 of the third parameter  (default: Ri) */
+macro F20Param3(u,mu,v,mv)
+(
+  int2d(th) ( y*(  -u#T*v#x  )   )  
+)
+//EOM
+
+
+
+////////////  TERMS OF THE THIRD ORDER  //////////////
+
+macro F3Model(mA,uA,mB,uB,v)
+(
+  int2d(th) 
+  ( 
+        - y*Conv(mA,uA,mB,uB,v)
+        + y*v#T*ugradf(1i*mA,uA,uB#T) 
+        + y*v#T*ugradf(mB,uA,uB#T) 
+  ) 
+)
+//EOM
+
+macro F3ModelCoeff(mA,uA,mB,uB,v,Coeff)
+(
+  int2d(th) 
+  ( 
+        - Coeff*y*Conv(mA,uA,mB,uB,v)
+        + Coeff*y*v#T*ugradf(1i*mA,uA,uB#T) 
+        + Coeff*y*v#T*ugradf(mB,uA,uB#T) 
+  ) 
+)
+//EOM
+
+/* Macros for the computation of coefficients of the normal form */
+
+/* Let us consider the complex notation of the normal form: 
+                - Complex amplitudes: a_0, a_1, a_2 
+                - Time derivative: D_t
+                - Coefficients: b_{ijk|nml,rst}. The first three indices indicate the appearance of a_0,a_1,a_2
+                  the second triplet denote the occurence of conjugate terms and the last triplet the dependency on parameters.
+                - Parameters are denoted \eta_{\nu}, \eta_{\kappa}, \eta_{\beta}, the first, second and third parameters respectively. 
+   
+  (1.1)          D_t a_0 = a_0 (  b_{100|000,100} \eta_{\nu} +  b_{100|000,010} \eta_{\kappa} + b_{100|000,001} \eta_{\beta} ) 
+                         + a_0 (  b_{200|100,000} |a_0|^2    +  b_{110|010,000} |a_1|^2       + b_{101|001,000} |a_2|^2      )
+                         + b_{010|101,000} a_1 conj(a_0 a_2) 
+  
+  (1.2)          D_t a_1 = a_1 (  b_{010|000,100} \eta_{\nu} +  b_{010|000,010} \eta_{\kappa} + b_{010|000,001} \eta_{\beta} ) 
+                         + a_1 (  b_{110|100,000} |a_0|^2    +  b_{020|010,000} |a_1|^2       + b_{011|001,000} |a_2|^2      )
+                         + b_{201|000,000} a_2 a_0^2 
+
+  (1.3)          D_t a_2 = a_2 (  b_{001|000,100} \eta_{\nu} +  b_{001|000,010} \eta_{\kappa} + b_{001|000,001} \eta_{\beta} ) 
+                         + a_0 (  b_{101|100,000} |a_0|^2    +  b_{011|010,000} |a_1|^2       + b_{002|001,000} |a_2|^2      )
+                         + b_{010|200,000} a_1 conj(a_0)^2 
+
+*/
+
+/* First equation */
+
+/* Linear coefficients -- parameter dependent */ 
+
+/* b_{100|000,100} */
+
+macro F3AEpsParam1()
+(
+  F20Param1(uModeA1,1i*mModeA,uModeA1Acon,-1i*mModeA)
+)
+//EOM
+
+macro F31ModeAModeEpsParam1()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeepsParam1,uModeA1A)
+)
+//EOM
+
+/* b_{100|000,010} */
+
+macro F3AEpsParam2()
+(
+  F20Param2(uModeA1,1i*mModeA,uModeA1Acon,-1i*mModeA)
+)
+//EOM
+
+macro F31ModeAModeEpsParam2()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeepsParam2,uModeA1A)
+)
+//EOM
+
+/* b_{100|000,001} */
+
+macro F3AEpsParam3()
+(
+  F20Param3(uModeA1,1i*mModeA,uModeA1Acon,-1i*mModeA)
+)
+//EOM
+
+macro F31ModeAModeEpsParam3()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeepsParam3,uModeA1A)
+)
+//EOM
+
+/* Cubic coefficients */ 
+
+/* b_{200|100,000} */
+
+macro F3AAabs2()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeA20,uModeA1A)
+)
+//EOM
+
+macro F3AconA2()
+(
+  F3Model(-1i*mModeA,uModeA1con,2*1i*mModeA,uModeA22,uModeA1A)
+)
+//EOM
+
+/*  b_{110|010,000} */
+
+macro F3ABabs2()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeB20,uModeA1A)
+)
+//EOM
+
+macro F3BconAB()
+(
+  F3Model(-1i*mModeB,uModeB1con,(1i*mModeA+1i*mModeB),uModeAmodeB,uModeA1A)
+)
+//EOM
+
+macro F3BABcon()
+(
+  F3Model(1i*mModeB,uModeB1,(1i*mModeA-1*mModeB),uModeAModeBcon,uModeA1A)
+)
+//EOM
+
+/* b_{101|001,000} */
+
+macro F3Aconabs2()
+(
+  F3Model(1i*mModeA,uModeA1,0,uModeC20,uModeA1A)
+)
+//EOM
+
+macro F3CconAC()
+(
+  F3Model(-1i*mModeC,uModeC1con,(1i*mModeA+1i*mModeC),uModeAmodeC,uModeA1A)
+)
+//EOM
+
+macro F3CACcon()
+(
+  F3Model(1i*mModeC,uModeC1,(1i*mModeA-1*mModeC),uModeAModeCcon,uModeA1A)
+)
+//EOM
+
+/* b_{010|101,000} */
+
+macro F3BAconCcon()
+(
+  F3Model(1i*mModeB,uModeB1,(-1i*mModeA-1i*mModeC),uModeAModeCconj,uModeA1A)
+)
+//EOM
+
+macro F3AconBCcon()
+(
+  F3Model(-1i*mModeA,uModeA1con,(1i*mModeB-1i*mModeC),uModeBModeCcon,uModeA1A)
+)
+//EOM
+
+macro F3CconAconB()
+(
+  F3Model(-1i*mModeC,uModeC1,(-1i*mModeA+1i*mModeB),uModeAModeBconconj,uModeA1A)
+)
+//EOM
+
+
+/* Second equation */
+
+/* Linear coefficients -- parameter dependent */ 
+
+/* b_{010|000,100} */
+
+macro F3BEpsParam1()
+(
+  F20Param1(uModeB1,1i*mModeB,uModeB1Acon,-1i*mModeB)
+)
+//EOM
+
+macro F31ModeBModeEpsParam1()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeepsParam1,uModeB1A)
+)
+//EOM
+
+/* b_{010|000,010} */
+
+macro F3BEpsParam2()
+(
+  F20Param2(uModeB1,1i*mModeB,uModeB1Acon,-1i*mModeB)
+)
+//EOM
+
+macro F31ModeBModeEpsParam2()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeepsParam2,uModeB1A)
+)
+//EOM
+
+/* b_{010|000,001} */
+
+macro F3BEpsParam3()
+(
+  F20Param3(uModeB1,1i*mModeB,uModeB1Acon,-1i*mModeB)
+)
+//EOM
+
+macro F31ModeBModeEpsParam3()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeepsParam3,uModeB1A)
+)
+//EOM
+
+/* Cubic coefficients */ 
+
+/* b_{110|100,000} */
+
+macro F3BAabs2()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeA20,uModeB1A)
+)
+//EOM
+
+macro F3AconAB()
+(
+  F3Model(-1i*mModeA,uModeA1con,(1i*mModeB+1i*mModeA),uModeAModeB,uModeB1A)
+)
+//EOM
+
+macro F3AAconB()
+(
+  F3Model(1i*mModeA,uModeA1,(1i*mModeB-1i*mModeA),uModeAModeBconconj,uModeB1A)
+)
+//EOM
+
+/* b_{020|010,000} */
+
+macro F3BBabs2()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeB20,uModeB1A)
+)
+//EOM
+
+macro F3BconB2()
+(
+  F3Model(-1i*mModeB,uModeB1con,2*1i*mModeB,uModeB22,uModeB1A)
+)
+//EOM
+
+
+/* b_{011|001,000} */
+
+macro F3BCabs2()
+(
+  F3Model(1i*mModeB,uModeB1,0,uModeC20,uModeB1A)
+)
+//EOM
+
+macro F3CconBC()
+(
+  F3Model(-1i*mModeC,uModeC1con,(1i*mModeB+1i*mModeC),uModeBModeC,uModeB1A)
+)
+//EOM
+
+macro F3CBCcon()
+(
+  F3Model(1i*mModeC,uModeC1,(1i*mModeB-1i*mModeC),uModeBModeCcon,uModeB1A)
+)
+//EOM
+
+/* b_{201|000,000} */
+
+macro F3AAC()
+(
+  F3Model(1i*mModeA,uModeA1,(1i*mModeA+1i*mModeC),uModeAModeC,uModeA1A)
+)
+//EOM
+
+macro F3CA2()
+(
+  F3Model(1i*mModeC,uModeC1,2*1i*mModeA,uModeA22,uModeA1A)
+)
+//EOM
+
+/* Third equation */
+
+/* Linear coefficients -- parameter dependent */ 
+
+/* b_{010|000,100} */
+
+macro F3CEpsParam1()
+(
+  F20Param1(uModeC1,1i*mModeC,uModeC1Acon,-1i*mModeC)
+)
+//EOM
+
+macro F31ModeCModeEpsParam1()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeepsParam1,uModeC1A)
+)
+//EOM
+
+/* b_{010|000,010} */
+
+macro F3CEpsParam2()
+(
+  F20Param2(uModeC1,1i*mModeC,uModeC1Acon,-1i*mModeC)
+)
+//EOM
+
+macro F31ModeCModeEpsParam2()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeepsParam2,uModeC1A)
+)
+//EOM
+
+/* b_{010|000,001} */
+
+macro F3CEpsParam3()
+(
+  F20Param3(uModeC1,1i*mModeC,uModeC1Acon,-1i*mModeC)
+)
+//EOM
+
+macro F31ModeCModeEpsParam3()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeepsParam3,uModeC1A)
+)
+//EOM
+
+/* Cubic coefficients */ 
+
+/* b_{101|100,000} */
+
+macro F3CAabs2()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeA20,uModeC1A)
+)
+//EOM
+
+macro F3AconAC()
+(
+  F3Model(-1i*mModeA,uModeA1con,(1i*mModeC+1i*mModeA),uModeAModeC,uModeC1A)
+)
+//EOM
+
+macro F3AACcon()
+(
+  F3Model(1i*mModeA,uModeA1,(1i*mModeC-1i*mModeA),uModeAModeCconconj,uModeC1A)
+)
+//EOM
+
+/* b_{011|010,000} */
+
+macro F3CBabs2()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeB20,uModeC1A)
+)
+//EOM
+
+macro F3BconBC()
+(
+  F3Model(-1i*mModeB,uModeB1con,(1i*mModeC+1i*mModeB),uModeBModeC,uModeC1A)
+)
+//EOM
+
+macro F3BBconC()
+(
+  F3Model(1i*mModeB,uModeB1,(1i*mModeC-1i*mModeB),uModeBModeCconconj,uModeC1A)
+)
+//EOM
+
+/* b_{002|001,000} */
+
+macro F3CCabs2()
+(
+  F3Model(1i*mModeC,uModeC1,0,uModeC20,uModeC1A)
+)
+//EOM
+
+macro F3CconC2()
+(
+  F3Model(-1i*mModeC,uModeC1con,2*1i*mModeC,uModeC22,uModeC1A)
+)
+//EOM
+
+/* b_{010|200,000} */
+
+macro F3AconAconB()
+(
+  F3Model(-1i*mModeA,uModeA1con,(-1i*mModeA+1i*mModeB),uModeAModeBconconj,uModeC1A)
+)
+//EOM
+
+macro F3BA2con()
+(
+  F3Model(1i*mModeB,uModeB1,2*-1i*mModeA,uModeA22con,uModeC1A)
+)
+//EOM
+
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+     
+//////////////////////////////////////////////////////////////////////////////////
+//
+//    5 : Reading files and parameters
+//
+
+SFParameters
+SFReadInputFiles
+SFEpsilon
+SFNormalisation
+SFConjugateDeclare
+SFNormalisationAdj
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//      6 : Resolution
+//
+
+/* Assumed: 
+            - A -- steady-state mode with m_A != 0
+            - B -- Rotating wave 
+            - C -- Opposing rotating wave
+
+   with the following rules:
+            omega_A = 0; m_B + m_C = 0; omega_B - omega_C = 0; 
+*/
+cout << " Solving problems of order 2 of base-flow correction :" << endl;
+
+// Mode A^2 -- (2*omega_A, 2*m_A)
+varf varf2A2(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,2*mModeA,2*lambdaCModeA) ) 
+                                + Boundaryconditions(u,v,2*mModeA);
+
+// Mode B^2 -- (2*omega_B, 2*m_B)
+varf varf2B2(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,2*mModeB,2*lambdaCModeB) ) 
+                                + Boundaryconditions(u,v,2*mModeB);
+
+// Mode C^2 -- (2*omega_C, 2*m_C)
+varf varf2C2(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,2*mModeC,2*lambdaCModeC) ) 
+                                + Boundaryconditions(u,v,2*mModeC);
+
+// Mode AB or AB*|x|^2 where x = A,B or C -- (omega_A+omega_B, m_A+m_B)
+varf varf2AB(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeA+mModeB),(lambdaCModeA + lambdaCModeB)) ) 
+                                + Boundaryconditions(u,v,(mModeA+mModeB));
+
+// Mode AC or AC*|x|^2 where x = A,B or C -- (omega_A+omega_C, m_A+m_C)
+varf varf2AC(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeA+mModeC),(lambdaCModeA + lambdaCModeC)) ) 
+                                + Boundaryconditions(u,v,(mModeA+mModeC));
+
+// Mode BC or BC*|x|^2 where x = A,B or C -- (omega_B+omega_C, m_B+m_C)
+varf varf2BC(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeB+mModeC),(lambdaCModeB + lambdaCModeC)) ) 
+                                + Boundaryconditions(u,v,(mModeB+mModeC));
+
+// Mode A*conj(B) or A*conj(B)*|x|^2 where x = A,B or C -- (omega_A-omega_B, m_A-m_B)
+varf varf2ABcon(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeA-mModeB),(lambdaCModeA - lambdaCModeB)) ) 
+                                   + Boundaryconditions(u,v,(mModeA-mModeB));
+
+// Mode A*conj(C) or A*conj(C)*|x|^2 where x = A,B or C -- (omega_A-omega_C, m_A-m_C)
+varf varf2ACcon(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeA-mModeC),(lambdaCModeA - lambdaCModeC)) ) 
+                                   + Boundaryconditions(u,v,(mModeA-mModeC));
+
+// Mode B*conj(C) or B*conj(C)*|x|^2 where x = A,B or C -- (omega_B-omega_C, m_B-m_C)
+varf varf2BCcon(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,(mModeB-mModeC),(lambdaCModeB - lambdaCModeC)) ) 
+                                   + Boundaryconditions(u,v,(mModeB-mModeC));
+
+// Mode |A|^2,|B|^2 or |C|^2 or higher orders -- (0,0)
+varf varf2abs(defUU(u),defUU(v)) = int2d(th)( NSL(nu,ub,u,v,0,0.0) ) + Boundaryconditions(u,v,0);
+
+///////////////////// Parameters only //////////////////////////////////
+// Resonant term Param 1
+varf NLF2EpsParam1(defUU(u),defUU(v)) = F20Param1(ub,0,v,0);
+
+// Resonant term Param 2
+varf NLF2EpsParam2(defUU(u),defUU(v)) = F20Param2(ub,0,v,0);
+
+// Resonant term Param 3
+varf NLF2EpsParam3(defUU(u),defUU(v)) = F20Param3(ub,0,v,0);
+
+///////////////////// On Amplitudes only ///////////////////////////
+
+// A^2
+varf NLF2A2(defUU(u),defUU(v)) = F3ModelCoeff(1i*mModeA,uModeA1,1i*mModeA,uModeA1,v,0.5);
+
+// B^2
+varf NLF2B2(defUU(u),defUU(v)) = F3ModelCoeff(1i*mModeB,uModeB1,1i*mModeB,uModeB1,v,0.5);
+
+// C^2
+varf NLF2C2(defUU(u),defUU(v)) = F3ModelCoeff(1i*mModeC,uModeC1,1i*mModeC,uModeC1,v,0.5);
+
+// |A|^2
+varf NLF2Aabs2(defUU(u),defUU(v)) = F3Model(1i*mModeA,uModeA1,-1i*mModeA,uModeA1con,v);
+
+// |B|^2
+varf NLF2Babs2(defUU(u),defUU(v)) = F3Model(1i*mModeB,uModeB1,-1i*mModeB,uModeB1con,v);
+
+// |C|^2
+varf NLF2Cabs2(defUU(u),defUU(v)) = F3Model(1i*mModeC,uModeC1,-1i*mModeC,uModeC1con,v);
+
+// AB
+varf NLF2AB(defUU(u),defUU(v)) = F3Model(1i*mModeA,uModeA1,1i*mModeB,uModeB1,v);
+
+// AC
+varf NLF2AC(defUU(u),defUU(v)) = F3Model(1i*mModeA,uModeA1,1i*mModeC,uModeC1,v);
+
+// BC
+varf NLF2BC(defUU(u),defUU(v)) = F3Model(1i*mModeB,uModeB1,1i*mModeC,uModeC1,v);
+
+// A*conj(B)
+varf NLF2ABcon(defUU(u),defUU(v)) = F3Model(1i*mModeA,uModeA1,-1i*mModeB,uModeB1con,v);
+
+// A*conj(C)
+varf NLF2ACcon(defUU(u),defUU(v)) = F3Model(1i*mModeA,uModeA1,-1i*mModeC,uModeC1con,v);
+
+// B*conj(C)
+varf NLF2BCcon(defUU(u),defUU(v)) = F3Model(1i*mModeB,uModeB1,-1i*mModeC,uModeC1con,v);
+
+/////////////////////////// Linear matrix /////////////////////////////////
+
+matrix<complex> matLinOpMode2A2  = varf2A2(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2B2  = varf2B2(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2C2  = varf2B2(fespaceLocal,fespaceLocal);
+
+matrix<complex> matLinOpMode2AB  = varf2AB(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2AC  = varf2AC(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2BC  = varf2BC(fespaceLocal,fespaceLocal);
+
+matrix<complex> matLinOpMode2ABcon = varf2ABcon(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2ACcon = varf2ACcon(fespaceLocal,fespaceLocal);
+matrix<complex> matLinOpMode2BCcon = varf2BCcon(fespaceLocal,fespaceLocal);
+
+matrix<complex> matLinOpMode2abs = varf2abs(fespaceLocal,fespaceLocal);
+
+////////////////////////////// RHS ////////////////////////////////////////
+
+complex[int] RHS2EpsParam1(ubx[].n);      RHS2EpsParam1 = NLF2EpsParam1(0,fespaceLocal);
+complex[int] RHS2EpsParam2(ubx[].n);      RHS2EpsParam2 = NLF2EpsParam2(0,fespaceLocal);
+complex[int] RHS2EpsParam3(ubx[].n);      RHS2EpsParam3 = NLF2EpsParam3(0,fespaceLocal);
+
+complex[int] RHS2A2(ubx[].n);      RHS2A2 = NLF2A2(0,fespaceLocal);
+complex[int] RHS2B2(ubx[].n);      RHS2B2 = NLF2B2(0,fespaceLocal);
+complex[int] RHS2C2(ubx[].n);      RHS2C2 = NLF2C2(0,fespaceLocal);
+
+complex[int] RHS2Aabs2(ubx[].n);   RHS2Aabs2 = NLF2Aabs2(0,fespaceLocal);
+complex[int] RHS2Babs2(ubx[].n);   RHS2Babs2 = NLF2Babs2(0,fespaceLocal);
+complex[int] RHS2Cabs2(ubx[].n);   RHS2Cabs2 = NLF2Cabs2(0,fespaceLocal);
+
+complex[int] RHS2AB(ubx[].n);      RHS2AB = NLF2AB(0,fespaceLocal);
+complex[int] RHS2AC(ubx[].n);      RHS2AC = NLF2AC(0,fespaceLocal);
+complex[int] RHS2BC(ubx[].n);      RHS2BC = NLF2BC(0,fespaceLocal);
+
+complex[int] RHS2ABcon(ubx[].n);     RHS2ABcon = NLF2ABcon(0,fespaceLocal);
+complex[int] RHS2ACcon(ubx[].n);     RHS2ACcon = NLF2ACcon(0,fespaceLocal);
+complex[int] RHS2BCcon(ubx[].n);     RHS2BCcon = NLF2BCcon(0,fespaceLocal);
+
+cout << " Setting solver for linear operators at order 2 " << endl;
+
+set(matLinOpMode2A2,solver=sparsesolver);
+set(matLinOpMode2B2,solver=sparsesolver);
+set(matLinOpMode2C2,solver=sparsesolver);
+
+set(matLinOpMode2AB,solver=sparsesolver);
+set(matLinOpMode2AC,solver=sparsesolver);
+set(matLinOpMode2BC,solver=sparsesolver);
+
+set(matLinOpMode2ABcon,solver=sparsesolver);
+set(matLinOpMode2ACcon,solver=sparsesolver);
+set(matLinOpMode2BCcon,solver=sparsesolver);
+
+set(matLinOpMode2abs,solver=sparsesolver);
+
+//////////////////// Resolution of linear non-resonant systems /////////////////////////
+
+uModeepsParam1x[] = matLinOpMode2abs^-1*RHS2EpsParam1;
+uModeepsParam2x[] = matLinOpMode2abs^-1*RHS2EpsParam2;
+uModeepsParam3x[] = matLinOpMode2abs^-1*RHS2EpsParam3;
+
+uModeA22x[] = matLinOpMode2A2^-1*RHS2A2;
+uModeA20x[] = matLinOpMode2abs^-1*RHS2Aabs2;
+
+uModeB22x[] = matLinOpMode2B2^-1*RHS2B2;
+uModeB20x[] = matLinOpMode2abs^-1*RHS2Babs2;
+
+uModeC22x[] = matLinOpMode2C2^-1*RHS2C2;
+uModeC20x[] = matLinOpMode2abs^-1*RHS2Cabs2;
+
+uModeAModeBx[] = matLinOpMode2AB^-1*RHS2AB;
+uModeAModeBconx[] = matLinOpMode2ABcon^-1*RHS2ABcon;
+
+uModeAModeCx[] = matLinOpMode2AC^-1*RHS2AC;
+uModeAModeCconx[] = matLinOpMode2ACcon^-1*RHS2ACcon;
+
+uModeBModeCx[] = matLinOpMode2AC^-1*RHS2AC;
+uModeBModeCconx[] = matLinOpMode2ACcon^-1*RHS2ACcon;
+
+//////////////// Computaton of conjugated terms /////////////////////////////////
+
+uModeA22conx[]     = conj(uModeA22x[]);
+uModeB22conx[]     = conj(uModeB22x[]);
+uModeC22conx[]     = conj(uModeC22x[]);
+
+uModeAModeBconjx[]  = conj(uModeAModeBx[]);
+uModeAModeBconconjx[] = conj(uModeAModeBconx[]);
+
+uModeBModeCconjx[]  = conj(uModeBModeCx[]);
+uModeBModeCconconjx[] = conj(uModeBModeCconx[]);
+
+uModeAModeCconjx[]  = conj(uModeAModeCx[]);
+uModeAModeCconconjx[] = conj(uModeAModeCconx[]);
+
+///////////////////////////////////////////////////////////////////////////////
+/////// ORDER 3
+
+cout << " Computing coeffs at order 3 :" << endl;
+
+///////////////////// Coefficients A //////////////////////////////////////////
+
+complex aA00 = F3AEpsParam1;
+complex aA01 = F31ModeAModeEpsParam1;
+complex aA10 = F3AEpsParam2;
+complex aA11 = F31ModeAModeEpsParam2;
+complex aA20 = F3AEpsParam3;
+complex aA21 = F31ModeAModeEpsParam3;
+
+///////////////////// Coefficients A|A|^2 /////////////////////////////////////
+
+complex aAAabs20 = F3AAabs2;
+complex aAAabs21 = F3AconA2;
+
+///////////////////// Coefficients A|B|^2 /////////////////////////////////////
+
+complex aABabs20 = F3ABabs2;
+complex aABabs21 = F3BconAB;
+complex aABabs22 = F3BABcon;
+
+///////////////////// Coefficients A|B|^2 /////////////////////////////////////
+
+complex aACabs20 = F3ACabs2;
+complex aACabs21 = F3CconA2;
+complex aACabs22 = F3CACcon;
+
+///////////////////// Coefficients conj(A) B conj(C) //////////////////////////
+
+complex aAconBCcon20 = F3BAconCcon;
+complex aAconBCcon21 = F3AconBCcon;
+complex aAconBCcon22 = F3CconAconB;
+
+///////////////////// Coefficients B //////////////////////////////////////////
+
+complex aB00 = F3BEpsParam1;
+complex aB01 = F3BModeBModeEpsParam1;
+complex aB10 = F3BEpsParam2;
+complex aB11 = F31ModeBModeEpsParam2;
+complex aB20 = F3BEpsParam3;
+complex aB21 = F31ModeBModeEpsParam3;
+
+///////////////////// Coefficients B|A|^2 /////////////////////////////////////
+
+complex aBAabs20 = F3BAabs2;
+complex aBAabs21 = F3AconAB;
+complex aBAabs22 = F3AAconB;
+
+///////////////////// Coefficients B|B|^2 /////////////////////////////////////
+
+complex aBBabs20 = F3BBabs2;
+complex aBBabs21 = F3BconB2;
+
+///////////////////// Coefficients C|A|^2 /////////////////////////////////////
+
+complex aBCabs20 = F3BCabs2;
+complex aBCabs21 = F3CconBC;
+complex aBCabs22 = F3CBCcon;
+
+///////////////////// Coefficients C A^2 /////////////////////////////////////
+
+complex aCA20 = F3AAC;
+complex aCA21 = F3CA2;
+
+/////////////////////  Coefficients C  ///////////////////////////////////////
+
+complex aC00 = F3CEpsParam1;
+complex aC01 = F3CModeAModeEpsParam1;
+complex aC10 = F3CEpsParam2;
+complex aC11 = F31ModeCModeEpsParam2;
+complex aC20 = F3CEpsParam3;
+complex aC21 = F31ModeCModeEpsParam3;
+
+///////////////////// Coefficients C|A|^2 ////////////////////////////////////
+
+complex aCAabs20 = F3CAabs2;
+complex aCAabs21 = F3CconAC;
+complex aCAabs22 = F3CACcon;
+
+///////////////////// Coefficients C|B|^2 ////////////////////////////////////
+
+complex aCBabs20 = F3CBabs2;
+complex aCBabs21 = F3CconBC;
+complex aCBabs22 = F3CBCcon;
+
+///////////////////// Coefficients C|C|^2 /////////////////////////////////////
+
+complex aCCabs20 = F3CCabs2;
+complex aCCabs21 = F3CconC2;
+
+///////////////////// Coefficients B conj(A)^2 ////////////////////////////////
+
+complex aBconA20 = F3AconAconB;
+complex aBconA21 = F3BA2con;
+
+///////////////////////////////////////////////////////////////////////////////
+
+
+//// GENERATE FILE WITH ALL COEFFS ; USEFUL FOR MATLAB DRIVER
+
+SFWriteStructureWNL("WNL_results.ff2m",uModeA1,uModeB1,uModeC1,omegaCModeA,omegaCModeB,omegaCModeC,"WNL")
+
+
+//////// GENERATE "GUESS FILES" TODO: Check utility in this case for modeA m=0, modeB m=0 or extension of HBM for non-null m
+
+fespaceLocal defUU(um); // mean flow is so far considered ub
+
+
+{
+  ofstream file(ffdatadir+"MeanFlow_guess.txt");
+  umx[] = ubx[];
+  file << umx[]; 
+  file << Re << endl << 0 << endl;
+}; 
+
+SFWriteBaseFlow(ffdatadir+"MeanFlow_guess.ff2m",um,"MeanFlow",1);
+
+{
+  ofstream file(ffdatadir+"HBMode1_guess.txt");
+    file << uModeA1x[]; 
+    file <<  endl << 0 << endl << omegaCModeA  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"HBMode1_guess.ff2m",uModeA1,"ModeA",mModeA);
+
+{
+    ofstream file(ffdatadir+"HBMode2_guess.txt");
+    file << uModeB1x[] ;  
+    file <<  endl  << 0 << endl << omegaCModeB  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"HBMode2_guess.ff2m",uModeB1,"ModeB",mModeB);
+
+{
+    ofstream file(ffdatadir+"HBMode3_guess.txt");
+    file << uModeC1x[] ;  
+    file <<  endl  << 0 << endl << omegaCModeC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"HBModeC_guess.ff2m",uModeC1,"ModeC",mModeC);
+
+
+{
+  ofstream file(ffdatadir+"ModeA1A_guess.txt");
+    file << uModeA1Ax[]; 
+    file <<  endl << 0 << endl << omegaCModeA  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeA1A_guess.ff2m",uModeA1A,"ModeA_Adjoint",mModeA);
+
+{
+    ofstream file(ffdatadir+"ModeB1A_guess.txt");
+    file << uModeB1Ax[] ;  
+    file <<  endl  << 0 << endl << omegaCModeB  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeB1A_guess.ff2m",uModeB1A,"ModeB_Adjoint",mModeB);
+
+
+{
+    ofstream file(ffdatadir+"ModeC1A_guess.txt");
+    file << uModeC1Ax[] ;  
+    file <<  endl  << 0 << endl << omegaCModeC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeC1A_guess.ff2m",uModeC1A,"ModeC_Adjoint",mModeC);
+
+
+{
+  ofstream file(ffdatadir+"ModeA20_guess.txt");
+    file << uModeA20x[]; 
+    file <<  endl << 0 << endl << 0.0  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeA20_guess.ff2m",uModeA20,"ModeA_AAcon",0);
+
+{
+    ofstream file(ffdatadir+"ModeA22_guess.txt");
+    file << uModeA22x[] ;  
+    file <<  endl  << 0 << endl << 2*omegaCModeA  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeA22_guess.ff2m",uModeA22,"ModeA_AA",2*mModeA);
+  
+{
+  ofstream file(ffdatadir+"ModeB20_guess.txt");
+    file << uModeB20x[]; 
+    file <<  endl << 0 << endl << 0.0  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeB20_guess.ff2m",uModeB20,"ModeA_BBcon",0);
+
+{
+    ofstream file(ffdatadir+"ModeB22_guess.txt");
+    file << uModeB22x[] ;  
+    file <<  endl  << 0 << endl << 2*omegaCModeB  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeB22_guess.ff2m",uModeB22,"ModeA_BB",2*mModeB);
+  
+{
+  ofstream file(ffdatadir+"ModeC20_guess.txt");
+    file << uModeC20x[]; 
+    file <<  endl << 0 << endl << 0.0  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeC20_guess.ff2m",uModeC20,"ModeC_CCcon",0);
+
+{
+    ofstream file(ffdatadir+"ModeC22_guess.txt");
+    file << uModeC22x[] ;  
+    file <<  endl  << 0 << endl << 2*omegaCModeC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeC22_guess.ff2m",uModeC22,"ModeC_CC",2*mModeC);
+  
+
+{
+    ofstream file(ffdatadir+"ModeAB_guess.txt");
+    file << uModeAModeBx[] ;  
+    file <<  endl << 0 << endl << omegaCModeA+omegaCModeB << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeAB_guess.ff2m",uModeAModeB,"ModeA_AB",mModeA+mModeB);
+  
+{
+    ofstream file(ffdatadir+"ModeABcon_guess.txt");
+    file << uModeAModeBconx[];  
+    file <<  endl  << 0 << endl << omegaCModeA-omegaCModeB  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeABcon_guess.ff2m",uModeAModeBcon,"ModeA_ABcon",mModeA-mModeB);
+
+{
+    ofstream file(ffdatadir+"ModeAC_guess.txt");
+    file << uModeAModeCx[] ;  
+    file <<  endl << 0 << endl << omegaCModeA+omegaCModeC << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeAC_guess.ff2m",uModeAModeB,"Mode_AC",mModeA+mModeC);
+  
+{
+    ofstream file(ffdatadir+"ModeACcon_guess.txt");
+    file << uModeAModeCconx[];  
+    file <<  endl  << 0 << endl << omegaCModeA-omegaCModeC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeACcon_guess.ff2m",uModeAModeCcon,"Mode_ACcon",mModeA-mModeC);
+
+{
+    ofstream file(ffdatadir+"ModeBC_guess.txt");
+    file << uModeBModeCx[] ;  
+    file <<  endl << 0 << endl << omegaCModeB+omegaCModeC << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeBC_guess.ff2m",uModeBModeC,"Mode_BC",mModeB+mModeC);
+  
+{
+    ofstream file(ffdatadir+"ModeBCcon_guess.txt");
+    file << uModeBModeCconx[];  
+    file <<  endl  << 0 << endl << omegaCModeB-omegaCModeC  << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"ModeBCcon_guess.ff2m",uModeBModeCcon,"Mode_BCcon",mModeB-mModeC);
+
+{
+    ofstream file(ffdatadir+"Mode_BF_param1.txt");
+    file << uModeepsParam1x[];  
+    file <<  endl  << 0 << endl << 0 << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"Mode_BF_param1.ff2m",uModeepsParam1,"Mode_BF_Param1",0);
+
+{
+    ofstream file(ffdatadir+"Mode_BF_param2.txt");
+    file << uModeepsParam2x[];  
+    file <<  endl  << 0 << endl << 0 << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"Mode_BF_param2.ff2m",uModeepsParam1,"Mode_BF_Param2",0);
+
+{
+    ofstream file(ffdatadir+"Mode_BF_param3.txt");
+    file << uModeepsParam3x[];  
+    file <<  endl  << 0 << endl << 0 << endl;
+};
+
+SFWriteModeWNL(ffdatadir+"Mode_BF_param3.ff2m",uModeepsParam1,"Mode_BF_Param3",0);

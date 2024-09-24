@@ -1,0 +1,114 @@
+// File MappingDef_Jet.idp
+// This case corresponds to the mapping type "jet" initially used in Fabre et al's JFMS on jet impedance.
+//
+// For proper operation this case requires the following parameters (in Mapping_Params.idp)
+//
+// real ParamMapLm = 10 ; 	// where the x-mapping is applied
+// real ParamMapLA =30 ;	// parameter affecting x-stretching
+// real ParamMapLC = 2.5 ;	// thickness of the transition region  
+// real ParamMapGC = .3 ;	// amplitude of complex
+// real ParamMapyA = 10	;	// where the y-stretching is applied 
+// real ParamMapyB = 30 ;	// parameter affecting x-stretching 
+
+cout << "%% Using complex mapping as defined in INCLUDE/MappingDef_Jet.idp" << endl;
+
+// definition of the mapping in x direction (complex)
+
+func complex GrStretch(real x,real y, real LA, real LB)
+{ 
+if ((y>LA)&&(x>0))
+	{ 
+		real distX = (y-LA);
+		real distXStretch = distX/(LB - LA);
+		real coeffStretch = (1-distXStretch^2)^2;
+		real coeffX = distX/coeffStretch;
+		return LA + coeffX;
+	} 
+else
+	{ return y;} 
+};
+
+
+func complex HrinvStretch(real x, real y, real LA, real LB)
+{ 
+if ((y>LA)&&(x>0))
+	{ 	
+		real distX = (y-LA);
+		real distXStretch = distX/(LB - LA);
+		real coeffStretch = (1-distXStretch^2)^2;
+		real coeffStretchThird = (1-distXStretch^2)^3;
+		real coeffX = distX/coeffStretch;
+		real termOne = (1.0/coeffStretch);
+		real termTwo = 0; /*  4*(distX^2/coeffStretchThird)/(LA-Lm)^2; */
+		return termOne+termTwo;
+	} 
+else
+	{ 	
+		return 1;
+	};
+};
+
+
+func complex Gx(real x, real Lm, real LA, real LC, real GC)
+{ 
+if(x>Lm)
+	{ 
+		real distX = (x-Lm);
+		real distXStretch = distX/(LA - Lm);
+		real coeffStretch = (1-distXStretch^2)^2;
+		real coeffX = distX/coeffStretch;
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distXTh);
+		return Lm + coeffX*(1.0+1i*GC*tanhxsq);
+	} 
+else
+	{ return x;} 
+};
+
+
+func complex Hxinv(real x, real Lm, real LA, real LC, real GC)
+{ 
+if(x>Lm)
+	{ 	
+		real distX = (x-Lm);
+		real distXStretch = distX/(LA - Lm);
+		real coeffStretch = (1-distXStretch^2)^2;
+		real coeffStretchThird = (1-distXStretch^2)^3;
+		real coeffX = distX/coeffStretch;
+		real distXTh = distX^2/LC^2;
+		real tanhxsq = tanh(distXTh);
+		complex termOne = (1.0/coeffStretch)*(1.0+1i*GC*tanhxsq);
+		complex termTwo = 4*(distX^2/coeffStretchThird)/(LA-Lm)^2*(1+1i*GC*tanhxsq);
+		complex termThree = 2*(distX^2/coeffStretch)*1i*GC*(1.0-tanhxsq^2)/LC^2;
+		return termOne+termTwo+termThree;
+	} 
+else
+	{ 	
+		return 1;
+	};
+};
+macro DEFMapping()
+cout << "## creating complex mapping metrics with macro DEFMapping ... ";
+p1<complex> theXphys,theRphys,theHxinv,theHrinv;
+theXphys = Gx(x,ParamMapLm,ParamMapLA,ParamMapLC,ParamMapGC);
+theHxinv = Hxinv(x,ParamMapLm,ParamMapLA,ParamMapLC,ParamMapGC);
+theRphys = GrStretch(x,y,ParamMapyA,ParamMapyB) ;
+theHrinv = HrinvStretch(x,y,ParamMapyA,ParamMapyB) ;
+cout << " DONE !" << endl;
+//EOM
+
+
+macro Xphys(x,y,ParamMap)  ( Gx(x,ParamMap#Lm,ParamMap#LA,ParamMap#LC,ParamMap#GC) )  //EOM 
+macro dX(a) ( 1.0/theHxinv*dx(a) ) //EOM 
+macro Rphys(x,y,ParamMap)  ( GrStretch(x,y,ParamMap#yA,ParamMap#yB) )  //EOM 
+macro dY(a) ( 1.0/theHrinv*dy(a) ) //EOM 
+macro JJ() (theHxinv*theHrinv) //EOM // Jacobian of the coordinate change 
+macro JJJ() (theRphys*theHxinv*theHrinv) //EOM // cylindrical Jacobian including geometric term
+
+
+cout << "#######################################################" << endl << endl;
+cout << "####    Using COMPLEX MAPPING type JET " << endl << endl;
+cout << " Parameters : " << " ParamMapLm  ParamMapLA  ParamMapLC ParamMapGC  ParamMapyA ParamMapyB" <<  endl;                                      
+cout <<  ParamMapLm << " " <<   ParamMapLA << " " << ParamMapLC << " " << ParamMapGC << " " << ParamMapyA << " " << ParamMapyB <<  endl; 
+cout << "#######################################################" << endl << endl;
+

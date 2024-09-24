@@ -1,0 +1,463 @@
+/// 
+/// file SF_Tools.idp
+///
+/// This file contains macros and functions used in most of the FreeFem solvers in the StabFem solver
+///
+
+/// TODO : fill this file with useful thinds !
+///
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+//
+// First a few useful macros to be used everywhere...
+//
+
+IFMACRO(!ffdatadir)
+macro ffdatadir() "./WORK/" //EOM (Normally this is defined in SF_AutoInclude.idp)
+ENDIFMACRO
+
+IFMACRO(!themeshfilename)
+macro themeshfilename() ffdatadir+"/mesh.msh" //EOM (Normally this is defined in SF_AutoInclude.idp)
+ENDIFMACRO
+
+IFMACRO(!theinitfilename)
+macro theinitfilename() ffdatadir+"/Init.txt" //EOM (Normally this is defined in SF_AutoInclude.idp)
+ENDIFMACRO
+
+include "getARGV.idp"; // for optional arguments
+
+macro MatPETSC Mat // EOM
+
+macro SFVTK
+{
+  load "iovtk"  
+}   // EOM
+
+macro SFerror(string)
+{	
+	ofstream file(ffdatadir+"freefemerror.txt",append);
+	file << string << endl; 
+	cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ "  << endl; 
+	cout << "$$$ " << endl; 
+	cout << "$$$ FREEFEM ERROR : " << string << endl; 
+	cout << "$$$ "  << endl; 
+	cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ "  << endl; 
+};
+//EOM
+
+macro SFwarning(string)
+{	
+	ofstream file(ffdatadir+"freefemwarning.txt",append);
+	file << string << endl; 
+	cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ "  << endl; 
+	cout << "$$$ " << endl; 
+	cout << "$$$ FREEFEM WARNING : " << string << endl; 
+	cout << "$$$ "  << endl; 
+	cout << "$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$ "  << endl; 
+};
+//EOM
+
+/* The next macro returns -1 if the file does not exist and the dimension of the field (integer at first line) if the file exists */
+macro SFcheckfile(namefile,testCB)
+{	testCB = 0;
+	cout << "checking for file " << ffdatadir+namefile << " ...." << endl;
+	try
+		{ ifstream file(ffdatadir+namefile); file >> testCB; }
+	catch(...)
+		{testCB = -1; 
+		cout << "$$ NB : this 'ERROR' message is normal at this stage, the error was correcty caughth by StabFem. Relax !" << endl; 
+		};
+};
+//EOM
+
+/* The next function returns true if the file exists, false otherwise */
+func bool SFCheckFileExists(string namefile)
+{	bool testCB = true;
+	try
+		{ ifstream file(namefile);  }
+	catch(...)
+		{testCB = false; 
+		cout << "$$ NB : this 'ERROR' message is normal at this stage, the error was correcty caughth by StabFem. Relax !" << endl; };
+	return testCB; 
+};
+
+// THE NEXT IS SIMPLER BUT DOES BNOT WORK WITH WINDOWS
+//func bool SFCheckFileExists(string namefile)
+//{	bool testCB = true;
+//	int a = system("test -e "+namefile);
+//  return (a==0);
+//};
+
+macro CleanExitFromTimeStepping(filename)
+{
+    if (SFCheckFileExists(filename)==0)
+    {
+      /* Procedure to stop a simulation ; this usually happens when using "SF_TS_Stop" */
+      try{ 
+        ofstream file3(filename);
+        file3 << "stopped" << endl;
+         }
+        catch(...)
+        { cout << "problem with TS.status" << endl;
+        };
+    
+      IFMACRO(SFWriteField)
+      SFWriteField;
+      ENDIFMACRO
+      SFerror("Process was stopped after receiving a 'clean exit' signal");
+      exit(202);  
+    };
+} 
+//EOM
+
+func string SFDetectWorkDir()
+{ 
+SFerror("WARNING : do not use SFDetecWorkDir any more !  The preambule of ff programs should simply include 'StabFem.idp'  ");
+}
+
+
+func string FixedFormatInt(int n, int N)
+{
+string str = n;
+ while (str.length<N)
+{str = "0"+str;}
+ return str;
+}
+
+
+///// MACROS FOR FINITE ELEMENT SPACES : DEFAULT VALUES [P2,P1] for [u,p] are now defined here.
+// (they may be redefined either in SF_Custom.idp or SF_AutoInclude.idp)
+ 
+IFMACRO(!Pu) 
+macro Pu P2 //FEspace for velocity 
+macro Pustring() "P2" //
+ENDIFMACRO
+IFMACRO(!Pp) 
+macro Pp P1 //FEspace for pressure 
+macro Ppstring() "P1" //
+ENDIFMACRO
+
+
+///// MACROS FOR MESH PERIODICITY :
+IFMACRO(!MESHPERIODICITY)
+macro MESHPERIODICITY() [[41,y],[42,y]] //EOM
+ENDIFMACRO
+	
+///////////////////////////////////////////////////////////////////////////////////////////
+//
+// macro SFEVSOLVE (ARPACK or SLEPC) 
+//	
+
+//IFMACRO(!EIGENSOLVER)	
+//macro 	EIGENSOLVER ARPACK //EOM
+//ENDIFMACRO
+
+IFMACRO(!SFShiftAndInvert)
+macro SFShiftAndInvert(OP,B,X,shiftOPOP,lambda,iter,itermaxSI,errormaxSI)
+{
+  real errSI=1;
+  complex lambda0 = sqrt(pi); /* bad value of course */
+  int iterSI;
+  for (iterSI=0; ((errSI>errormaxSI)&&(iterSI<itermaxSI)); iterSI++)
+	{
+	complex[int] X0 = X;
+	complex[int] rhs= B*X0;  
+	X = OP^-1*rhs;
+IFMACRO(OLDSHIFINVERT) 	
+	complex XnXn1 = X0'*rhs;
+	complex Xn1Xn1 =  X'*rhs;
+ENDIFMACRO
+IFMACRO(!OLDSHIFINVERT) 	
+	complex XnXn1 = rhs'*X0;
+	complex Xn1Xn1 =  rhs'*X;
+ENDIFMACRO	
+	complex GG = Xn1Xn1/XnXn1;
+	lambda = shiftOPOP+1/GG;
+	cout << " Shift-invert : iteration " << iterSI << " ; lambda = " << lambda << endl;
+	errSI = abs(lambda-lambda0);
+	lambda0 = lambda;	
+	};
+	iter = iterSI;
+	if(iter>=itermaxSI)
+	{
+		SFerror("$$ SHIFT-INVERT ITERATION FAILED");
+		cout << "$$ Leaving FreeFem++ with error code 202" << endl;
+		exit(202);
+	};
+};
+//EOM
+ENDIFMACRO
+
+
+IFMACRO(EIGENSOLVER,ARPACK)
+macro SFEVSOLVE(k,nev,OP,B,shiftOP,ev,EigenVEC)
+  if(nev>1)
+  {
+	cout << "computing Eigenvalues with ARPACK / EigenValue "<< endl;
+	int ncv = 4*nev;   /* Krylov Basis */
+	real timeEig = clock();
+	k=EigenValue(OP,B,sigma=shiftOP,value=ev,rawvector=EigenVEC,tol=1e-8,maxit=0,ncv=ncv);
+	timeEig = clock()-timeEig; 
+	cout <<"Eigenvalues found : "<< k <<" in "<< timeEig <<" s"<< endl;
+	cout <<"------------------------------------------"<< endl;  
+  }
+  else
+  {
+  cout << "computing 1 Eigenvalue with simple Shift/Invert algorithm"<< endl;	
+  int iterSISI=0;	
+  complex[int] X(OP.n);
+  complex lambda;
+  X = 1;
+  SFShiftAndInvert(OP,B,X,shiftOP,lambda,iterSISI,100,1e-6);	
+  ev(0) = lambda;
+  k=1;
+  EigenVEC(:,0) = X;
+  };
+//EOM
+ENDIFMACRO
+
+/* Version to be used with "stable" versions of FreeFem, sequencial (at least up to 4.0) */
+IFMACRO(SLEPCLEGACY) 
+macro   BUILDMATSLEPC(OP,B) 
+  int[int] arrayIntersection(0);              
+  int[int][int] restrictionIntersection(0);   
+  real[int] D1(OP.n);                           
+  D1.resize(OP.n);
+  D1 = 1;
+  Mat<complex> DA(OP, arrayIntersection, restrictionIntersection, D1);
+  Mat<complex> DB(DA,B);
+// EOM
+ENDIFMACRO
+
+/* Common version, to be used with 4.2.3 version of FreeFem++, sequencial  or parallel */
+IFMACRO(!SLEPCLEGACY) 
+macro   BUILDMATSLEPC(OP,B) 
+	int[int][int] arrayIntersection(0);   
+	real[int] D1(OP.n);                  
+	IFMACRO(def)
+	   broadcast(processor(0, mpiCommWorld), th);    
+	   build(th, 1, arrayIntersection, D1, Pk, mpiCommWorld);  
+	ENDIFMACRO
+	Mat<complex> DA(OP, arrayIntersection, D1, clean=true);
+	Mat<complex> DB(B, arrayIntersection, D1, clean=true); 
+// EOM
+ENDIFMACRO
+
+
+IFMACRO(EIGENSOLVER,SLEPC)
+	macro SFEVSOLVE(k,nev,OP,B,shift,EigenVAL,EigenVEC)
+	cout << "computing Eigenvalues with SLEPC / EPSSOLVE "<< endl;
+  
+  BUILDMATSLEPC(OP,B) /* It builds Mat matrix */
+
+	complex sigmaSLEPc = 1e-12 + 1i*0.0;
+	string ssparams =            	
+       " -eps_nev " + nev             	/* Number of eigenvalues*/
+/*    +" -eps_target " + sigmaSLEPc    	   Shift >> looking for the smallest eigenvalue of OP*/
+/*    +" -eps_smallest_real "   		   Shift option */
+      +" -eps_smallest_magnitude "   	/* Shift option */
+/*    +" -eps_smallest_imaginary "   	*/
+/*    +" -eps_largest_real "   		 Shift option  */    
+/*    +" -eps_harmonic "             
+/*    +" -eps_largest_magnitude "    	 Shift option	 */ 
+/*    +" -eps_gen_hermitian"         	 The problem is symmetric( A^T=A) or Hermitian (A*=A) */
+/*    +" -eps_pos_gen_non_hermitian"     The problem is not hermitian (A*!=A) with positive (semi-)definite B matrix */
+      +" -eps_gen_non_hermitian "        /* The problem is not hermitian (A*!=A) by default
+      +" -eps_type krylovschur "     	Type of Eigen Problem Solver 
+/*    +" -eps_type arnoldi "         	Type of Eigen Problem Solver  */
+      +" -st_type sinvert "          	/* Spectral Transformation */
+      +" -st_pc_type lu "            	/* Solver for the linear systems */
+      +" -eps_target "+sigmaSLEPc+" "	/* ??? */
+/*    +" -st_pc_type gamg "          	Solver for the linear systems */
+/*    +" -st_pc_type sor "           	Solver for the linear systems */
+      +" -st_pc_factor_mat_solver_type mumps "
+/*    +" -eps_view "  */
+/*    +" -eps_conv_abs " */
+      ;
+	real timeEig = clock();
+	{
+	k = EPSSolve
+	(
+	 DA,              		/* matrix OP = A - shift B	*/
+	 DB,              		/* B matrix					*/
+	 array   = EigenVEC, 	/* Array to store the FEM-EigenFunctions	*/
+	 values  = EigenVAL, 	/* Array to store the EigenValues			*/
+	 sparams = ssparams  	/* Parameters for the distributed EigenValue solver */
+	);
+	}
+	timeEig = clock()-timeEig; 
+	cout <<"Eigenvalues found : "<< k <<" in "<< timeEig <<" s"<< endl;
+	cout <<"------------------------------------------"<< endl;
+		for (int i=0; i<min(k,nev); i++)
+		{
+		EigenVAL[i] = EigenVAL[i]+shift; /* adding the value of the shift */
+		};
+//EOM
+ENDIFMACRO
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+//
+// macro SFWriteMesh (default macro) 
+//
+
+IFMACRO(!SFWriteMesh)
+macro SFWriteMesh(filename,TH,typemesh)
+{
+     ofstream fileFF(filename);
+     fileFF << "### Data generated by Freefem++ ; " << endl;
+     fileFF << "Mesh (generated by generic macro)" << endl;
+     fileFF << "datatype Mesh meshtype 2D generationmode " << typemesh << endl;
+     fileFF << "P1 TriangleSize " << endl;
+     fespace femp1N(TH,P1);
+     femp1N delta = hTriangle;
+     for (int j=0;j<delta[].n ; j++) fileFF << delta[][j] << endl;     
+};       
+//EOM
+ENDIFMACRO
+
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+//
+// The next is for free-surface problems ; maybe to put elsewhere ?
+//
+	
+
+macro SFWriteSurface(filename,th) /* This one is for static problems */
+{
+            ofstream file(filename); 
+			file << "Data generated by FreeFem++" << endl;
+			file << "Surface information for free-surface problems " << endl;
+    		file << "datatype FreeSurface datastoragemode Re.3 datadescriptors gamma,rhog,GAMMABAR" << endl;
+			file << "real* P0 real* Vol real* gamma real* rhog real* GAMMABAR " << endl;
+			file << PP0 << endl << 2*pi*int2d(th)(x) <<  endl;
+			file << gamma << endl << dpdz << endl << GAMMABAR << endl << endl;
+}
+//EOM	
+
+
+macro SFWriteMeshSurface(filename,th) /* This one is for free-surface problems */
+{
+            ofstream file(filename); 
+            string P1surf = "real."+(Nsurface+1);
+			file << "Data generated by FreeFem++" << endl;
+			file << "Surface information for free-surface problems " << endl;
+    		file << "datatype FreeSurface" << endl;
+			file << "int nsurf "+P1surf+" rsurf "+P1surf+" zsurf "+P1surf+" S0 "
+					+P1surf+" N0r "+P1surf+" N0z "+P1surf+" K0a "+P1surf+" K0b "+P1surf+ " alpha" << endl; /* Geometry of the free surface */
+			file << Nsurface+1 << endl << endl;		
+            for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << xPointSurf(ksurf) << endl;} 
+            file << endl;
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << yPointSurf(ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << S0PointSurf(ksurf) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << N0r(xPointSurf(ksurf), yPointSurf(ksurf) ) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << N0z(xPointSurf(ksurf), yPointSurf(ksurf) ) << endl;} 
+			file << endl;
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << K0aPointSurf(ksurf) << endl;} 
+			file << endl;			
+			for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << K0bPointSurf(ksurf) << endl;} 
+			file << endl;
+            for(int ksurf=0;ksurf<Nsurface+1;ksurf++) { file << alphaPointSurf(ksurf) << endl;} 
+            file << endl;
+}
+//EOM	
+
+
+///////////////////////////////////////////////////////////////////////////////////////////
+//
+// macro SFWriteConnectivity
+//
+
+IFMACRO(!STORAGEMODES)
+macro STORAGEMODES() "P2,P2P2P1,P2P2P2P1"	//EOM
+ENDIFMACRO
+
+IFMACRO(!VhList)
+macro VhList() STORAGEMODES	//EOM
+ENDIFMACRO
+
+
+
+
+
+
+macro checkFESPACE(Th,nameFES,defFES)
+if(datastor.find(","+nameFES+",")>-1)
+  		{
+  		fespace THISFESPACE(Th,defFES,periodic=MESHPERIODICITY);
+  	    int connectivitylength = Th.nt*THISFESPACE.ndofK;	
+  		connectivitydescription = connectivitydescription 
+  		+ " int." + connectivitylength + " Vh_"+nameFES+" " ;
+    	for (int i=0; i<Th.nt; i++)
+  			{
+    		for (int j=0; j<THISFESPACE.ndofK; j++)
+    			{
+      			connectivitytable(iindex) =  THISFESPACE(i,j);
+      			iindex++;
+    			}
+  			}
+  		};
+//EOM
+
+macro SFWriteConnectivity(filename,Th)
+{
+	string datastoragemodes = VhList; /* this string is defined as a macro in your SF_Custom file */
+	/* This macro is needed to plot P2 fields or composite fields such as P2P2P1, etc... 			*/
+	/* Usage : 																						*/
+	/* in your StabFem_custom.idp you should call it like 											*/
+	/* SFWriteConnectivity("mesh_connectivity.msh",th)									*/
+	/* The macro requires a string "datastoragemode" containing the needed formats separated by commas (no blanks!) */ 
+    /* This string is usually defined in your SF_Custom.idp file */
+  	string datastor = ","+datastoragemodes+",";
+	string connectivitydescription = "";
+  	int[int] connectivitytable(100*Th.nt);
+  	int iindex = 0;
+  	if(datastor.find(",P2,")>-1)
+  		{   /* We have to write np2 in file as it is not easily deduced from other stuff 
+  		       (maybe obsolete ?) */
+  			connectivitydescription = connectivitydescription + " int np2 ";
+  			fespace p2MACRO(Th,P2,periodic=MESHPERIODICITY);
+  	        int np2 = p2MACRO.ndof;  
+  			connectivitytable(iindex) =  np2;
+      		iindex++;	
+  		};	
+		checkFESPACE(Th,"P2P2P1",[P2,P2,P1])
+		checkFESPACE(Th,"P2P2P2P1",[P2,P2,P2,P1])
+		checkFESPACE(Th,"P1bP1bP1",[P1b,P1b,P1])
+		checkFESPACE(Th,"P2",P2)
+		checkFESPACE(Th,"P2P2",[P2,P2]) 
+		checkFESPACE(Th,"P2P1bP1",[P2,P1b,P1])  
+		checkFESPACE(Th,"P2P2P1P1",[P2,P2,P1,P1]) 
+		checkFESPACE(Th,"P2P2P2P1P1",[P2,P2,P2,P1,P1]) 
+		checkFESPACE(Th,"P2P2P1P1P1",[P2,P2,P1,P1,P1]) 
+		checkFESPACE(Th,"P2P2P1P2P2P2",[P2,P2,P1,P2,P2,P2]) 
+		checkFESPACE(Th,"P2P2P2P1P1P1",[P2,P2,P2,P1,P1,P1]) 
+		checkFESPACE(Th,"P1P1",[P1,P1]) 
+		checkFESPACE(Th,"P1P1P1",[P1b,P1b,P1]) 
+		checkFESPACE(Th,"P1bP1bP1bP1P1",[P1b,P1b,P1b,P1,P1])
+		checkFESPACE(Th,"P1bP1bP1bP1P1P1",[P1b,P1b,P1b,P1,P1,P1]) 
+		checkFESPACE(Th,"P2P1",[P2,P1])
+        checkFESPACE(Th,"P1P0",[P1,P0])    
+        checkFESPACE(Th,"P0P1P1P2",[P0,P1,P1,P2])   	
+
+		/* writing file */
+		ofstream file(filename);
+		file << "### File generated by Freefem++ ; " << endl;
+		file << "Connectivity data for P2 fields or vectorial fields" << endl;
+		file << "datatype connectivitydata" << endl; 
+		file << connectivitydescription << endl;
+		for (int j=0; j<iindex; j++)
+    			{
+      			file << connectivitytable(j) << "\n";
+    			}
+} //EOM
+
+
+
+

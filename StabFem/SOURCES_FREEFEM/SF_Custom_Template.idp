@@ -1,0 +1,17 @@
+/// 
+/// file SF_Custom.idp  (an example for the documentation)
+///
+// You can (re)define your macros here.
+// For instance if you are considering a flow in a pipe and you want to impose
+// a Poiseuille law at the inlet (boundary #1) instead of a constant velocity,
+// you will redefine the customisable macro "BoundaryconditionsBaseFlow" as follows:
+
+
+macro Rinlet() int1d(th,1)((y>0?1:0)) //EOM
+macro BoundaryconditionsBaseFlow(du,u,v)
+	           on(1,du#x=1.5*(1-y^2/Rinlet^2)-u#x,du#y=0.0-u#y)
+             + on(2,21,22,23,du#x=0.0,du#y=0.0)
+             + int1d(th,6)(du#x*v#x*1e30*(symmetryBaseFlow=="A")+du#y*v#y*1e30*(symmetryBaseFlow=="S"))       
+//EOM
+
+(...)

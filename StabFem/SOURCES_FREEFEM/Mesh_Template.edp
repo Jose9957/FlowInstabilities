@@ -1,0 +1,32 @@
+//
+//  PROGRAM Mesh_Template.edp
+//
+//  Template explaining how to generate a mesh for StabFem 
+// 
+
+include "StabFem.idp"
+
+(...)
+
+border cylinder(t=0,pi){ x=RADIUS*cos(t);y=RADIUS*sin(t);label=2;}
+border inlet(t=0,1){ x=xinlet;y=yside*(1-t);label=1;}
+border axis1(t=0,1){ x=xinlet+(-RADIUS-xinlet)*t;y=0;label=6;}
+border axis2(t=0,1){ x=RADIUS+(xoutlet-RADIUS)*t;y=0;label=6;}
+border outlet(t=0,1){ x=xoutlet;y=yside*t;label=3;}
+border latsup(t=0,1){ x=xoutlet-(xoutlet-xinlet)*t;y=yside;label=3;} 
+// See manual for recommendations about LABELS
+
+mesh th=buildmesh(inlet(yside*n)+axis1((-RADIUS-xinlet)*n)+axis2((xoutlet-RADIUS)*n)+outlet(2*yside*n)+latsup((xoutlet-xinlet)*n)+cylinder(-ns));
+
+// SAVE THE MESH in mesh.msh file 
+savemesh(th,ffdatadir+"mesh.msh");
+
+// AUXILIARY FILE  for Stabfem : mesh.ff2m
+IFMACRO(SFWriteMesh) /* Macro defined in SF_Custom.idp */
+	SFWriteMesh(ffdatadir+"mesh.ff2m",th,"initial")
+ENDIFMACRO
+
+// THIRD FILE NEEDED TO PLOT P2 AND VECTORIZED DATA
+IFMACRO(SFWriteConnectivity) /* Macro defined in SF_Custom.idp */
+	SFWriteConnectivity(ffdatadir+"mesh_connectivity.ff2m",th);
+ENDIFMACRO

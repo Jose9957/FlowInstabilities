@@ -1,0 +1,374 @@
+//
+//  PROGRAM Stab_2D_Comp.edp
+//	
+//	Performs the linear stability analysis of a 2D compressible subsonic flow
+//   
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re, Ma, shift(Re,im) , Symmetry, Type, nev 
+//
+//   this solver will use Arnoldi
+//
+//	INPUT FILES :
+//		BaseFlow.txt	-> base flow 
+// 		mesh.msh 			->  mesh in Freefem format
+//  OUTPUT FILES :
+//
+//  	Eigenmode##.txt   (txt format for FreeFem)
+//      Eigenmode##.ff2m  (ff2m format for stabfem)
+//
+// in all modes :
+//		Spectrum.txt -> All computed Eigenvalues
+//
+// 	ERROR MANAGEMENT : 
+//      if Arnoldi method fails, TODO: Not handled yet
+//
+// Updated in October 2019. J.S.
+
+
+include "StabFem.idp";
+
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 1 : parameters		
+//
+
+real gamma=getARGV("-gamma",1.4); 
+real Pr=getARGV("-Pr",0.7);
+func Pk = [P2,P2,P1,P1,P1];  // finite element space for PETSc
+real Re,Reans,Ma,Maans,Omegax,Omegaxans;
+real nu;
+string symmetry;
+string iadjoint;
+real shiftr, shifti;
+complex shiftOP, sigma;
+int nev, ncv; // number of eigenvalues, cardinal of Krylov Basis and number of eigenvalues computed
+string modeEig;
+string namefile, namefileMeth;
+int mComp;
+
+// INPUT  
+cout << " Enter Reynolds :   " << endl; cin  >> Re;
+IFMACRO(!SFReCustom)
+macro SFReCustom nu=1./Re; //EOM
+ENDIFMACRO
+SFReCustom
+cout << " Enter Mach :   " << endl; cin  >> Ma;
+cout << " Enter SHIFT (re,im) :   " << endl; cin  >> shiftr >> shifti; complex shift = 1i*shifti+shiftr;
+cout << " Azimuthal component (m)" << endl; cin >> mComp;
+cout << " Direct (D), Adjoint (A), D&A+sensitivity (S) ?" << endl; cin >> iadjoint;
+cout << " Enter nev ? (will use simple shift-invert if nev = 1)" << endl; cin >> nev;
+
+
+// OUTPUT
+cout << " ### PARAMETERS SELECTED : " << endl;
+cout << " Re = " << Re << endl;
+cout << " Ma = " << Ma << endl;
+cout << " Shift = " << shiftr+1i*shifti << endl; 
+cout << " Azimuthal component (m) = " << mComp << endl; 
+cout << " Method = " << iadjoint << endl; 
+cout << " gamma = " << gamma << endl;
+cout << " Pr = " << Pr << endl;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 2 : read files		
+//  
+
+/////////////////////MESH//////////////////////////////////////////
+
+meshN th;
+th=readmesh(ffdatadir+"mesh.msh"); // global mesh 
+
+///////////////////////////////////////////////////////////////////
+
+/////////////////////FE-SPACE//////////////////////////////////////////
+
+fespace XXxxxH(th,[P2,P2,P1,P1,P1]); /// 
+fespace XH(th,P2);             ////// f.e. space for vel.
+fespace xh(th,P1);            ////// f.e. space for pressure
+
+//////////////////////////// Def vector fields ///////////////////////////  
+
+macro defU(u,p,T,rho)[u#x,u#y,p,T,rho]//EOF
+macro defUU(u)[u#x,u#y,u#p,u#T,u#rho]//EOF
+XXxxxH defUU(Ub);
+XXxxxH<complex> defU(u,up,uT,urho);
+
+//////////////////////////// INITIAL CONDITIONS ///////////////////////////////
+int testCB;
+SFcheckfile("BaseFlow.txt",testCB);
+if (testCB==-1)
+{
+	if(mpirank==0) cout << "$$ No file BaseFlow.txt : starting from arbitrary initial condition" << endl;
+	IFMACRO(!DefaultGuessForNewton) // if your want something else this macro may be redefied in your Macro_StabFem.idp
+	macro DefaultGuessForNewton
+		defUU(Ub) = [0.0,0.0,0.0,1.0,1.0]; //EOM
+	ENDIFMACRO
+	DefaultGuessForNewton;
+} 
+else
+{
+    ifstream fileGuess(ffdatadir + "BaseFlow.txt");
+    fileGuess >> Ubx[];
+    fileGuess >> Reans;
+	fileGuess >> Maans;
+	if(mpirank==0) cout << "$$ Re of guess field : " << Reans << endl; 
+	if(mpirank==0) cout << "$$ Ma of guess field : " << Maans << endl; 
+};
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 3 : Customizable macros 	
+//
+//
+
+//////////////////////////// COMPLEX MAPPING //////////////////////////////////////////////////
+IFMACRO(!dX)
+macro dX(a) dx(a) //EOM
+macro dY(a) dy(a) //EOM
+ENDIFMACRO
+
+IFMACRO(!JJJ)
+macro JJJ y//EOM
+ENDIFMACRO
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////// SPONGE //////////////////////////////////////////////////////////
+XH AMPFORCE;
+
+IFMACRO(!SFSPONGE)
+macro SFSPONGE()
+	func real AmpSponge(real M, real xinf, real xsup, real yinfsup)  
+	{
+	  if(M>0)
+	    return abs(1.+1./M)*(x>xsup)*(alpha*(x-xsup))+abs(1.-1./M)*(x<xinf)*(alpha*(xinf-x))+abs(1./M)*(abs(y)>yinfsup)*(alpha*(abs(y)-yinfsup));
+	  else
+	    return 0.0;
+	}
+	AMPFORCE=AmpSponge(Ma,xinfm,xinfv,yinf);
+	
+//EOM
+ENDIFMACRO
+
+SFSPONGE
+
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+
+
+IFMACRO(!SFWriteMode)
+macro SFWriteMode(namefile,u,ev,shift,typeFlow,iter)
+{
+	ofstream file(namefile);
+	fespace p1forff2m(th,P1); 
+	p1forff2m xx,yy;
+	xx=x;
+	yy=y;
+    p1forff2m<complex> ux1,uy1,pp1,vort1,rho1,T1,divergence;
+	file << "### Data generated by Freefem++ ; " << endl;
+	file << "Eigenmode for a Axi-compressible problem " << endl;
+	file << "datatype " << typeFlow <<" datastoragemode CxP2P2P1P1P1.4 datadescriptors ux,uy,p,T,rho,Re,Ma,lambdar,lambdai" << endl;
+	string descriptionFF="real* Re real* Ma complex* lambda complex shift int iter P1c vort P1c divergence "; 
+	file << descriptionFF << endl << endl ; 
+	file << Re  << endl << Ma << endl << real(ev) << " " << imag(ev) << " " << real(shift) << " " << imag(shift) << " " << iter << endl << endl;
+	vort1=dy(u#x)-dx(u#y); 
+	divergence=dx(u#x)+dy(u#y); 	
+	for (int j=0;j<ux1[].n ; j++) file << real(vort1[][j]) << " " << imag(vort1[][j]) << endl;
+    for (int j=0;j<ux1[].n ; j++) file << real(divergence[][j]) << " " << imag(divergence[][j]) << endl;
+	};
+//EOM	
+ENDIFMACRO
+
+IFMACRO(!NormalizeMode)
+macro NormalizeMode(u,U)
+	{
+		complex NORM = sqrt(intN(th)((JJJ*U#rho*(abs(u#x)^2+abs(u#y)^2+abs(u#T)^2)+abs(u#rho)^2) ) );
+		u#x[] = u#x[]/NORM;
+	}
+//EOM
+ENDIFMACRO
+
+//////////////////////////// BOUNDARY CONDIT //////////////////////////////////////////////////
+IFMACRO(!BoundaryconditionsStability)
+macro BoundaryconditionsStability(du,us)
+               on(1,du#x=0.0,du#y=0.0,du#rho=0.0) 
+             + on(11,du#rho=0.0)
+             + on(3,du#x=0.0,du#y=0.0,du#rho=0.0)
+             + on(2,21,du#x=0.0,du#y=0.0)
+             + on(6,du#y=0.0)
+//EOM
+ENDIFMACRO
+///////////////////////////////////////////////////////////////////////////////////////////////
+
+    
+/////////////////////// Macros coordinate system /////////////////////////////////
+
+macro div(u) (dx(u#x)+dy(u#y)+u#y/y)//EOM
+macro ugradf(u,f) ((u#x*dx(f)+u#y*dy(f)))//EOM
+macro ugradfConj(u,f) ((conj(u#x)*dx(f)+conj(u#y)*dy(f)))    //
+macro realInnerProd(u,v) ((u#x*v#x + u#y*v#y)) //
+macro termnonlinear(u,v,w) ((w#x*(u#x*dx(v#x)+u#y*dy(v#x))+w#y*(u#x*dx(v#y)+u#y*dy(v#y))))//EOM
+macro Grad(u) [[dx(u#x),dx(u#y)],[dy(u#x),dy(u#y)]]//EOM
+macro Strain(u)[[dx(u#x),0.5*(dx(u#y)+dy(u#x))],[0.5*(dx(u#y)+dy(u#x)),dy(u#y)]]//EOM
+macro gradgrad(u,v)(dx(u)*dx(v)+dy(u)*dy(v))//EOM
+
+//////////////////////////////////////////////////////////////////////////////////
+
+/////////////////////// Macros Harmonic Balance //////////////////////////////////
+
+macro F2Omega(ua,ub,nOmega,v) ( nOmega*( ua#rho*realInnerProd(ub,v) + ua#rho*ub#T*v#T) ) // EOM for term F2Omega
+
+macro F20Rho(ua,ub,v) ( (ua#rho*div(ub) + ugradf(ua,ub#rho))*v#rho ) //EOM macro for F20Rho
+
+macro F20T(ua,ub,v) (
+			v#T*( 
+			- gamma*(gamma-1.0)*Ma^2/Re*(2.0*((Strain(ua):Strain(ub)))-2.0/3.0*(div(ua)*div(ub)))
+			)
+) //EOM macro for F20T
+
+macro F20P(ua,ub,v)  (-v#p*ua#rho*ub#T) //EOM macro for F20T
+
+macro F20(ua,ub,v) (F20Rho(ua,ub,v)+F20T(ua,ub,v)+F20P(ua,ub,v)) //EOM F20 Double Nonlinear term not involving Omega
+
+macro F30U(ua,ub,uc,v) ( ua#rho*termnonlinear(ub,uc,v) ) // EOM for term F30U
+
+macro F30T(ua,ub,uc,v) ( v#T*(ua#rho*ugradf(ub,uc#T) )
+						 + v#T*(gamma-1.0)*(ua#rho*ub#T*div(uc)) ) // EOM for term F30T
+
+macro F30(ua,ub,uc,v) (F30U(ua,ub,uc,v)+F30T(ua,ub,uc,v)) //EOM F30 Triple Nonlinear term
+
+macro Linear0U(u,v) ( -u#p*div(v)
+					  +2.0/Re*(Strain(u):Grad(v))
+					  -2.0/(3.0*Re)*(div(u)*div(v)) ) //EOM Linear0U
+
+macro Linear0T(u,v) ( gamma/(Pr*Re)*gradgrad(u#T,v#T) ) //EOM Linear0T
+
+macro Linear0P(u,v) ( gamma*Ma^2*u#p*v#p ) //EOM Linear0P
+
+macro Linear0(u,v) ( Linear0U(u,v) + Linear0T(u,v) + Linear0P(u,v) ) //EOM Linear operator not depending on Omega
+
+macro LinearOmega(u,nOmega,v) ( nOmega*u#rho*v#rho ) //EOM Linear operator depending on Omega
+
+macro CP(v)  (v#p) //EOM macro for constant term of termodynamic pressure
+
+macro NS(u,v)(  Linear0(u,v) + F20(u,u,v) + F30(u,u,u,v) + CP(v) ) //EOM macro for NS operator
+
+macro NSL(U,u,v)( Linear0(u,v) + F20(u,U,v) + F20(U,u,v) + F30(u,U,U,v) + F30(U,u,U,v) + F30(U,U,u,v) 
+				) // EOM macro for linear NS operator
+
+macro NSLDerU(dU,U,u,v)( F20(u,dU,v) + F20(dU,u,v) 
+						+ F30(u,dU,U,v) + F30(u,U,dU,v)
+					    + F30(dU,u,U,v) + F30(U,u,dU,v)
+					    + F30(dU,U,u,v) + F30(U,dU,u,v) 
+				) // EOM macro for linear NS operator
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 4 : Definition of problem
+//
+
+varf jacobian(defUU(du),defUU(us))=-intN(th)
+			  (JJJ*(NSL(Ub,du,us)
+			  // shift
+			  +shift*(usrho*durho+Ubrho*duy*usy+Ubrho*dux*usx+usT*Ubrho*duT)
+			  ))
+			  -int2d(th)(JJJ*AMPFORCE*(usy*duy+usx*dux+usT*duT+usrho*durho))
+			  +BoundaryconditionsStability(du,us);
+
+varf b(defUU(du),defUU(us))=intN(th)(JJJ*(usrho*durho+Ubrho*duy*usy+Ubrho*dux*usx+usT*Ubrho*duT));
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 5 : ARNOLDI SOLVER / SLEPC
+// 
+
+matrix<complex> OP,B;
+B= b(XXxxxH,XXxxxH);  
+
+if(iadjoint=="D")
+	{ OP=jacobian(XXxxxH,XXxxxH); shiftOP = shift; modeEig = "Eigenmode";}
+else if(iadjoint=="A")
+	{ OP=jacobian(XXxxxH,XXxxxH); OP = OP'; shiftOP = conj(shift); modeEig = "EigenmodeA";}
+else if(iadjoint=="S"||iadjoint=="cS"||iadjoint=="E") 
+	{ SFerror("$$ WARNING : type 'S'  and 'E' no longer supported ! please use SF_Sensitivity"); };
+
+set(OP,solver=sparsesolver);
+int k;
+complex[int] ev(nev); // Eigenvalues
+complex[int,int] EigenVEC(OP.n,nev);
+
+
+SFEVSOLVE(k,nev,OP,B,shiftOP,ev,EigenVEC); // Warning : in this macro OP is A - shift B !
+
+int Nmodes = min(k,nev); // nb. de vecteurs propres à post-traiter
+XXxxxH<complex> [int] [eux,euy,ep,eT,erho](Nmodes); // Eigenvectors
+for (int i=0; i<Nmodes; i++)
+{
+	eux[i][] = EigenVEC(:,i);
+};
+
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+//////////////////////////////////////////////////////////////////////////////////
+//
+//		CHAPTER 6 : PostProcessing
+//    
+
+namefile=ffdatadir+"Spectrum.txt";
+ofstream fileVP1(namefile); 
+for (int i=0;i<Nmodes;i++)
+{
+	if (iadjoint == "A")
+	{
+		ev[i] = conj(ev[i]); eux[i][] = conj(eux[i][]);
+	}
+     fileVP1 << real(ev[i]) << " " << imag(ev[i]) << endl;
+     cout << " Eigenvalue : " << i+1 << "  : " << ev[i] << endl;
+	 namefile=ffdatadir+"Eigenmode"+(i+1);
+	 // Normalize the mode
+	 ux[] = eux[i][];
+	 NormalizeMode(u,Ub);
+	 cout << "Normalizing eigenmode " << i << endl;
+	 cout << "Writing eigenmode in file " << namefile << endl;
+	 ofstream fileMode(namefile+".txt");
+		 fileMode.precision(16);
+   		 fileMode.scientific;
+		 fileMode << ux[]; 
+		 fileMode << endl << endl << Re << endl << Ma << endl << endl << real(ev[i]) << "   " << imag(ev[i])  << endl;
+  	  SFWriteMode(namefile+".ff2m",u,ev[i],shiftOP,modeEig,1); 	  
+};
+cout << "$$ --- Stability solver has finished --- $$" << endl;
+
+//
+//
+//
+//////////////////////////////////////////////////////////////////////////////////
+
+

@@ -1,0 +1,384 @@
+//
+//  PROGRAM TimeStepper_CompAcoust.edp
+//   
+//  Implements LO-LMNA (C. Nana et. al. (2012))
+//
+//  INPUT PARAMETERS (from keyboard or pipe) :
+//   	Re
+//		rep	
+//	    itmax	
+//      dt
+//      iout
+//		iplot
+//	INPUT FILES :
+//		DNSFIELDS/dnsfield_#####.txt
+//
+//  OUTPUT FILES :
+//		DNSFIELDS/dnsfield_#####.txt
+//		DNSFIELDS/dnsfield_#####.ff2m
+//
+// 	ERROR MANAGEMENT : 
+//
+//
+
+cout << "$$$$ ENTERING TimeStepper_CompAcoust.edp " << endl << "$$" << endl; 
+include "SF_Geom.edp";
+include "StabFem.idp";
+
+
+//    macro Trainee(u1,u2,p)   
+//	(
+//	int1d(th,2,21,22,23)(p*N.x)
+//	-nu*int1d(th,2,21,22,23)( (2*dx(u1)*N.x+(dx(u2)+dy(u1))*N.y))
+//	)
+	//EOM
+//	macro Portance(u1,u2,p)   
+//	(
+//	int1d(th,2,21,22,23)(p*N.y)
+//	-nu*int1d(th,2,21,22,23)( (2*dy(u2)*N.y+(dx(u2)+dy(u1))*N.x))
+//	)
+	//EOM
+
+/*=============================================
+=            Physical constants              =
+=============================================*/
+
+real Re,Reans;
+real Pr = 0.71;
+real gamma = 1.4;
+
+/*=============================================
+=            INPUT/OUTPUT                    =
+=============================================*/
+real dt,tps,epsilon;
+int it,rep,itmax;
+int iout; // to generate output files each iout time steps
+int iplot; // to plot (if using in interactive mode)
+
+cout << "###" << endl <<  "### TIME STEPPER" << endl << "###" << endl << endl;
+cout << "Enter Re : "<< endl;
+cin >> Re;			
+cout << "Enter initial instant : (0 means start from initial condition) "<< endl;
+cin >> rep;	
+cout << "Enter itmax"<< endl;
+cin >> itmax;	
+cout << "Enter dt"<< endl;
+cin >> dt;	
+cout << " Enter iout " << endl;
+cin >> iout;
+cout << " Enter iplot " << endl;
+cin >> iplot;
+int imean;
+cout << " Mode de calcul ? [0 -> pas de champ moyen] [1 -> calcul du champ moyen sur 1 periode] [2 -> calcul de l'ecart au champ moyen]" << endl;
+cin >> imean; 
+
+cout << endl << "Starting computation with : "<< endl;
+cout << "       Re = " << Re << endl;
+cout << "       dt = " << dt << endl;
+real nu=1.0/Re;
+
+/*=============================================
+=            MESH AND FEM SPACES             =
+=============================================*/
+
+mesh th=readmesh(ffdatadir+"mesh.msh");
+fespace XH2(th,P2);
+fespace XH(th,P1);
+fespace XXxH(th,[P2,P2,P1]);
+fespace XXxxxH(th,[P2,P2,P1,P1,P1]);
+
+/*=============================================
+=            Definition of fields             =
+=============================================*/
+
+macro def(u,p,T,rho)[u#x,u#y,p,T,rho]//EOF
+XXxxxH def(uinit,pinit,Tinit,rhoinit);
+/* Fields at the current timeStep at given stage */
+XXxxxH def(uStage1,pStage1,TStage1,rhoStage1);
+XXxxxH def(uStage2,pStage2,TStage2,rhoStage2);
+XXxxxH def(uEnd,uEndp,uEndT,uEndrho);
+/* Fields at previous timeSteps, n-1, n-2 */
+XXxxxH def(uPrev1,pPrev1,TPrev1,rhoPrev1);
+XXxxxH def(uPrev2,pPrev2,TPrev2,rhoPrev2);
+/* Source terms in momemtum */
+XH2 up1x,up1y,up2x,up2y,rhoup1x,rhoup1y;
+/* Source terms of P1 primitive rho,T,p */
+XH Tp1,Tp2,rhop1,rhop2;
+/* Unkwowns of momemtum */
+XH2 rhouStarx,rhouStary, rhoux, rhouy;
+/* Unkwowns of primitive rho,T,p */
+XH rho,drhodt,T,pInt;
+/* Test functions of momemtum */
+XH2 vrhoux,vrhouy;
+/* Test functions of rho,T,p */
+XH vrho,vdrho,vT,vp;
+
+/*=============================================
+=            INPUT I.C.                       =
+=============================================*/
+if(rep==0) // starting from a given initial condition
+{  
+	XXxH [u1b,u2b,pb];
+	cout << "Starting from a given initial condition" << endl;
+    {
+		ifstream file(ffdatadir+"dnsfield_start.txt");
+		file >> u1b[];
+		file >> Reans;
+    };
+    def(uinit,pinit,Tinit,rhoinit) = [u1b,u2b,pb,1.0+0.001*pb,1.0+0.001*pb];
+    tps = 0;
+    exec("rm dns_liftanddrag_Re"+Re+".txt");
+}
+else // Starting from previous solution. Restart
+{
+	ifstream file(ffdatadir+"DNSFIELDS/dnsfield_"+rep+".txt");
+	file >> uinitx[];
+	file >> tps;
+	cout << "Starting from previous field for it= " << rep << " ; tps = " << tps << endl; 
+};
+
+/*=============================================
+=                Initial CFL                  =
+=============================================*/
+
+XH cfl=1.*dt/hTriangle;
+XH rem=1*hTriangle/nu;
+
+IFMACRO(FREEFEMPLOTS,YES)
+plot(cfl,cmm="cfl",fill=1,value=1,wait=0);
+plot(rem,cmm="remaille",fill=1,value=1,wait=0);
+ENDIFMACRO
+
+/*=============================================
+=                RK3 coefficients             =
+=============================================*/
+
+real a1,a2,a3,b1,b2,b3,gamma1,gamma2,gamma3,aCoeff,bCoeff,gammaCoeff,sumGammak;
+a1 = 8.0/15.0;
+a2 = 5.0/12.0;
+a3 = 3.0/4.0;
+b1 = 0.;
+b2 = -17.0/60.;
+b3 = -5.0/12.0;
+gamma1 = a1+b1;
+gamma2 = a2+b2;
+gamma3 = a3+b3;
+
+/*=============================================
+=                Macros                       =
+=============================================*/
+
+macro div(u) ((dx(u#x)+dy(u#y)))   //EOM
+macro Strain(u)[[dx(u#x),0.5*(dy(u#y)+dy(u#x))],[0.5*(dx(u#y)+dy(u#x)),dy(u#y)]]//EOM
+macro Grad(u) [[dx(u#x),dx(u#y)],[dy(u#x),dy(u#y)]]//EOM
+macro ugradf(u,f) ((u#x*dx(f)+u#y*dy(f) ))    //
+macro gradgrad(u,v)(dx(u)*dx(v)+dy(u)*dy(v))//EOM
+macro innerproduct(u,v) ((u#x*v#x + u#y*v#y)) // EOM
+macro crossNL(u,v,w) ((w#x*(u#x*dx(v#x)+u#y*dy(v#x))+w#y*(u#x*dx(v#y)+u#y*dy(v#y)))) // u_j0*\frac{\partial u_i0}{\partial x_j} * test_i
+macro divNL(u,v,w) ( innerproduct(u,w)*div(v)  ) // u_i0*\frac{\partial u_j0}{\partial x_j} * test_i
+
+/*=============================================
+=                Equations                    =
+=============================================*/ 
+
+problem DensityRK3(rho,vrho) =
+	int2d(th) (rho*vrho)
+	- int2d(th) (rhop1*vrho)
+	+ int2d(th) (dt*aCoeff*( ugradf(up1,rhop1)*vrho - 1/(Re*Pr*Tp1)*gradgrad(Tp1,vrho)  ) 
+				+ dt*bCoeff*( ugradf(up2,rhop2)*vrho - 1/(Re*Pr*Tp2)*gradgrad(Tp2,vrho) )
+				);
+
+problem MomemtumPredRK3([rhouStarx,rhouStary],[vrhoux,vrhouy]) =
+	int2d(th) (innerproduct(rhouStar,vrhou))
+	- int2d(th) (innerproduct(rhoup1,vrhou))
+
+	+ int2d(th) (dt*aCoeff*( rhop1*crossNL(up1,up1,vrhou) + rhop1*divNL(up1,up1,vrhou) + ugradf(up1,rhop1)*innerproduct(up1,vrhou) 
+						 + 2.0/Re*(Strain(up1):Grad(vrhou))-2.0/(3.0*Re)*(div(up1)*div(vrhou))
+					   ) 
+				+ dt*bCoeff*(  rhop2*crossNL(up2,up2,vrhou) + rhop2*divNL(up2,up2,vrhou) + ugradf(up2,rhop2)*innerproduct(up2,vrhou) 
+						 + 2.0/Re*(Strain(up2):Grad(vrhou))-2.0/(3.0*Re)*(div(up2)*div(vrhou))
+					)
+				)
+ 	+on(1,rhouStarx=1.,rhouStary=0.)
+	+on(2,rhouStarx=0.,rhouStary=0.)
+	+on(4,rhouStary=0.)
+	;
+
+problem Temperature(T,vT) = 
+	int2d(th) (T*vT)
+	- int2d(th)(vT/rhop1);
+
+// It is likely wrong
+problem DerRhoDt(drhodt,vdrho) = 
+	int2d(th) (drhodt*vdrho)
+	- int2d(th) ( (1.0+sumGammak)*(ugradf(uPrev1,rhoPrev1)*vdrho - 1.0/(Re*Pr*TPrev1)*gradgrad(TPrev1,vdrho))
+				   -sumGammak*(ugradf(uPrev2,rhoPrev2)*vdrho - 1.0/(Re*Pr*TPrev2)*gradgrad(TPrev2,vdrho))    );
+
+problem Poisson(pInt,vp) = 
+	int2d(th) (dt*gradgrad(pInt,vp))
+	+ int2d(th) (vp*( div(rhouStar) +  drhodt))
+	+on(1,3,pInt=0.0 )
+	;
+
+problem MomemtumCorRK3([rhoux,rhouy],[vrhoux,vrhouy]) =
+	int2d(th) (innerproduct(rhou,vrhou))
+	- int2d(th) (innerproduct(rhouStar,vrhou))
+	+ int2d(th) (dt*ugradf(vrhou,pInt) )
+ 	+on(1,rhoux=1.,rhouy=0.)
+	+on(2,rhoux=0.,rhouy=0.)
+	+on(4,rhouy=0.)
+	;
+
+/*=============================================
+=                Initialization               =
+=============================================*/ 
+
+def(uPrev1,pPrev1,TPrev1,rhoPrev1) = def(uinit,pinit,Tinit,rhoinit);
+def(uPrev2,pPrev2,TPrev2,rhoPrev2) = def(uinit,pinit,Tinit,rhoinit);
+up1x = uPrev1x; up2x = uPrev2x;
+up1y = uPrev1y; up2y = uPrev2y;
+rhop1 = rhoPrev1; rhop2 = rhoPrev2;
+Tp1 = TPrev1; Tp2 = TPrev2;
+rhoup1x = rhop1*up1x; rhoup1y = rhop1*up1y;
+
+// INITIALISING TIME STATISTICS FILES
+DNSTimeStatisticsINIT(ffdatadir+"dns_Stats_Re"+Re)
+
+/*=============================================
+=              Time stepping loop             =
+=============================================*/ 
+
+for (it=rep+1;it<itmax+1;it++)
+{
+
+	/*=============================================
+	=              Stage 1                        =
+	=============================================*/ 
+	aCoeff = a1;
+	bCoeff = b1;
+	gammaCoeff = gamma1;
+	sumGammak = gamma1;
+	/* Update density at stage k+1 */
+	DensityRK3; // rho updated
+	/* Update momemtum predictor at stage k+1 */
+	MomemtumPredRK3; // rhouStar updated
+	/* Update Temperature stage k+1 */
+	Temperature; // T updated
+	/* Update \frac{\partial rho}{\partial t} stage k+1 */
+	drhodt = (rho-rhop1)/dt; // 
+	/* Update p integrated time stage k+1 */
+	Poisson; // pInt updated
+	/* Update momemtum corrector at stage k+1 */
+	MomemtumCorRK3; // rhou updated
+
+	/*----------  Update intermediate fields  ----------*/
+	/* k-1 stage equal k stage */
+	up2x = up1x;
+	up2y = up1y;
+	rhop2 = rhop1;
+	Tp2 = Tp1;
+	/* k stage equal k+1 stage */
+	up1x = rhoux/rho;
+	up1y = rhouy/rho;
+	rhop1 = rho;
+	Tp1 = T;
+	rhoup1x = rhoux;
+	rhoup1y = rhouy;
+	/* stage 1 field */
+	def(uStage1,pStage1,TStage1,rhoStage1) = def(up1,pInt,Tp1,rhop1);
+	cout << ">>>>>> STAGE 1 finished <<<<<<" << endl;
+	/*=============================================
+	=              Stage 2                        =
+	=============================================*/ 
+	aCoeff = a2;
+	bCoeff = b2;
+	gammaCoeff = gamma2;
+	sumGammak = gamma1+gamma2;
+
+	/* Update density at stage k+1 */
+	DensityRK3; // rho updated
+	/* Update momemtum predictor at stage k+1 */
+	MomemtumPredRK3; // rhouStar updated
+	/* Update Temperature stage k+1 */
+	Temperature; // T updated
+	/* Update \frac{\partial rho}{\partial t} stage k+1 */
+	drhodt = (rho-rhop1)/dt; // Derivative at 
+	/* Update p integrated time stage k+1 */
+	Poisson; // pInt updated
+	/* Update momemtum corrector at stage k+1 */
+	MomemtumCorRK3; // rhou updated
+
+	/*----------  Update intermediate fields  ----------*/
+	/* k-1 stage equal k stage */
+	up2x = up1x;
+	up2y = up1y;
+	rhop2 = rhop1;
+	Tp2 = Tp1;
+	/* k stage equal k+1 stage */
+	up1x = rhoux/rho;
+	up1y = rhouy/rho;
+	rhop1 = rho;
+	Tp1 = T;
+	rhoup1x = rhoux;
+	rhoup1y = rhouy;
+	/* stage 1 field */
+	def(uStage2,pStage2,TStage2,rhoStage2) = def(up1,pInt,Tp1,rhop1);
+	cout << ">>>>>> STAGE 2 finished <<<<<<" << endl;
+
+	/*=============================================
+	=              Stage 3                        =
+	=============================================*/ 
+	aCoeff = a3;
+	bCoeff = b3;
+	gammaCoeff = gamma3;
+	sumGammak = gamma1+gamma2+gamma3;
+
+	/* Update density at stage k+1 */
+	DensityRK3; // rho updated
+	/* Update momemtum predictor at stage k+1 */
+	MomemtumPredRK3; // rhouStar updated
+	/* Update Temperature stage k+1 */
+	Temperature; // T updated
+	/* Update \frac{\partial rho}{\partial t} stage k+1 */
+	drhodt = (rho-rhop1)/dt; // 
+	/* Update p integrated time stage k+1 */
+	Poisson; // pInt updated
+	/* Update momemtum corrector at stage k+1 */
+	MomemtumCorRK3; // rhou updated
+
+	/*----------  Update intermediate fields  ----------*/
+	/* k-1 stage equal k stage */
+	up2x = up1x;
+	up2y = up1y;
+	rhop2 = rhop1;
+	Tp2 = Tp1;
+	/* k stage equal k+1 stage */
+	up1x = rhoux/rho;
+	up1y = rhouy/rho;
+	rhop1 = rho;
+	Tp1 = T;
+	rhoup1x = rhoux;
+	rhoup1y = rhouy;
+	/* stage 1 field */
+	def(uEnd,uEndp,uEndT,uEndrho) = def(up1,pInt,Tp1,rhop1);
+	/* Generating time statistics files */ 
+	DNSTimeStatistics(ffdatadir+"dns_Stats_Re"+Re)
+
+	/*----------  Update previous fields   ----------*/
+	def(uPrev2,pPrev2,TPrev2,rhoPrev2) = def(uPrev1,pPrev1,TPrev1,rhoPrev1);
+	def(uPrev1,pPrev1,TPrev1,rhoPrev1) = def(uEnd,uEndp,uEndT,uEndrho);
+	cout << ">>>>>> STAGE 3 finished <<<<<<" << endl;
+
+	if (!((it)%iout))
+	// each iout time step we generate output files
+	{
+		ofstream g(ffdatadir+"DNSFIELDS/dnsfield_"+(it)+".txt");
+		g << uEndx[] << endl << endl;
+		g << Re << endl << endl;
+		g << tps << endl << endl;
+
+		SFWriteDNSField(ffdatadir+"DNSFIELDS/dnsfield_"+(it)+".ff2m",uEnd,"DNSField",it)
+
+	};
+
+};
